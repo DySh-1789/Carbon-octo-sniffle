@@ -1,20 +1,18 @@
-//! Stage 3 team battle rules: teams, tank units, capture zones, tickets, victory conditions,
-//! tank-vs-tank collision, and projectile-vs-tank hit geometry.
+//! Team battle rules: teams, tank units, capture zones, tickets, victory conditions,
+//! tank-vs-tank collision, and deterministic RNG.
 //!
-//! NOTE (Stage 3 stub): tanks are knocked out after [`STAGE3_HITS_TO_DESTROY`] direct hits.
-//! This temporary counter is fully replaced by the War Thunder-style module/crew damage model
-//! (no HP bar) in Stage 4.
+//! Stage 4 replaces the temporary Stage 3 hit counter with the War Thunder modular/crew damage
+//! state [`TankDamageState`] (no tank HP bar).
 
 use voxel::VoxelWorld;
-use voxel::glam::{Quat, Vec3};
+use voxel::glam::Vec3;
 
+use crate::damage::{ArmorHit, KillReason, TankDamageState, raycast_tank_armor};
 use crate::map_gen::MapMetadata;
 use crate::tank::TankState;
 
 /// Hard cap on tanks per battle (fits the `u16` visibility bitmasks).
 pub const MAX_TANKS: usize = 16;
-/// Stage 3 temporary knockout counter (replaced by WT damage model in Stage 4).
-pub const STAGE3_HITS_TO_DESTROY: u8 = 3;
 /// Starting tickets for each team.
 pub const START_TICKETS: f32 = 800.0;
 /// Tickets removed from a team each time one of its tanks is destroyed.
@@ -28,12 +26,6 @@ pub const BATTLE_TIME_LIMIT: f32 = 900.0;
 /// Maximum visual spotting / engagement distance in meters.
 pub const VISION_RANGE: f32 = 210.0;
 
-/// Hull hit box (hull-local, meters) matching the 16x8x30 voxel hull at 0.2 m.
-const HULL_BOX_MIN: Vec3 = Vec3::new(-1.6, 0.1, -3.0);
-const HULL_BOX_MAX: Vec3 = Vec3::new(1.6, 1.6, 3.0);
-/// Turret hit box (turret-local, meters) matching the 10x6x14 voxel turret.
-const TURRET_BOX_MIN: Vec3 = Vec3::new(-1.0, 0.0, -1.4);
-const TURRET_BOX_MAX: Vec3 = Vec3::new(1.0, 1.2, 1.4);
 /// Two-circle horizontal footprint used for tank-vs-tank collision.
 const FOOTPRINT_OFFSET: f32 = 1.25;
 const FOOTPRINT_RADIUS: f32 = 1.6;
@@ -90,8 +82,8 @@ pub struct TankUnit {
     pub is_player: bool,
     pub state: TankState,
     pub alive: bool,
-    /// Stage 3 stub knockout counter (see module docs).
-    pub hits_remaining: u8,
+    /// Pure War Thunder internal modules, crew, fire, and turret-detonation state (no HP bar).
+    pub damage: TankDamageState,
     pub kills: u32,
     pub hits_landed: u32,
     /// True while recently spotted by at least one living enemy.
@@ -109,7 +101,7 @@ impl TankUnit {
             is_player,
             state,
             alive: true,
-            hits_remaining: STAGE3_HITS_TO_DESTROY,
+            damage: TankDamageState::basic_medium_tank(),
             kills: 0,
             hits_landed: 0,
             spotted: false,
@@ -190,18 +182,7 @@ pub struct KillEvent {
     pub victim_id: TankId,
     pub victim_name: String,
     pub victim_team: Team,
-}
-
-#[derive(Copy, Clone, Debug)]
-pub struct TankHitEvent {
-    pub shooter_id: TankId,
-    pub target_id: TankId,
-    pub target_team: Team,
-    pub position: Vec3,
-    pub normal: Vec3,
-    /// False for friendly-fire / wreck hits that deal no damage.
-    pub damaged: bool,
-    pub destroyed: bool,
+    pub reason: KillReason,
 }
 
 /// Team battle scoreboard & objective state.
@@ -298,7 +279,6 @@ impl BattleState {
             };
             let rate = CAPTURE_RATE_PER_SEC * (1.0 + 0.5 * (count.min(3) as f32 - 1.0));
             zone.progress = (zone.progress + team.sign() * rate * dt).clamp(-1.0, 1.0);
-            // Enemy-owned zones are neutralized first, then captured
             if let Some(owner) = zone.owner
                 && owner != team
                 && zone.progress * owner.sign() <= 0.0
@@ -352,96 +332,42 @@ impl BattleState {
     }
 }
 
-/// Slab ray-vs-AABB test in a local frame. Returns `(t, local_normal)` of the entry point.
-fn ray_vs_aabb(origin: Vec3, dir: Vec3, min: Vec3, max: Vec3, max_t: f32) -> Option<(f32, Vec3)> {
-    let mut t_min = 0.0f32;
-    let mut t_max = max_t;
-    let mut normal = Vec3::ZERO;
-    for axis in 0..3 {
-        let o = origin[axis];
-        let d = dir[axis];
-        if d.abs() < 1e-8 {
-            if o < min[axis] || o > max[axis] {
-                return None;
-            }
-            continue;
-        }
-        let inv = 1.0 / d;
-        let mut t0 = (min[axis] - o) * inv;
-        let mut t1 = (max[axis] - o) * inv;
-        let mut n = Vec3::ZERO;
-        n[axis] = -d.signum();
-        if t0 > t1 {
-            std::mem::swap(&mut t0, &mut t1);
-        }
-        if t0 > t_min {
-            t_min = t0;
-            normal = n;
-        }
-        t_max = t_max.min(t1);
-        if t_min > t_max {
-            return None;
-        }
-    }
-    if normal == Vec3::ZERO {
-        // Ray starts inside the box — report an immediate hit facing back along the ray
-        normal = -dir;
-    }
-    Some((t_min, normal))
+/// Ray test against a tank's full Stage 4 armor geometry (hull, tracks, turret, cupola, barrel).
+pub fn ray_vs_tank(tank: &TankState, origin: Vec3, dir: Vec3, max_dist: f32) -> Option<(f32, Vec3)> {
+    raycast_tank_armor(tank, origin, dir, max_dist, true, true)
+        .map(|h| (h.distance, h.geom_normal_world))
 }
 
-fn ray_vs_oriented_box(
+/// Finds the closest tank armor hit along a ray, skipping `ignore` (usually the shooter).
+pub fn raycast_tanks_armor(
+    tanks: &[TankUnit],
     origin: Vec3,
     dir: Vec3,
-    max_t: f32,
-    frame_pos: Vec3,
-    frame_rot: Quat,
-    min: Vec3,
-    max: Vec3,
-) -> Option<(f32, Vec3)> {
-    let inv = frame_rot.inverse();
-    let lo = inv * (origin - frame_pos);
-    let ld = inv * dir;
-    ray_vs_aabb(lo, ld, min, max, max_t).map(|(t, n)| (t, frame_rot * n))
+    max_dist: f32,
+    ignore: Option<TankId>,
+) -> Option<(usize, ArmorHit)> {
+    let mut best: Option<(usize, ArmorHit)> = None;
+    for (i, t) in tanks.iter().enumerate() {
+        if Some(t.id) == ignore {
+            continue;
+        }
+        let limit = best.map_or(max_dist, |b| b.1.distance);
+        if let Some(hit) = raycast_tank_armor(
+            &t.state,
+            origin,
+            dir,
+            limit,
+            true,
+            !t.damage.turret_blown_off,
+        ) && best.is_none_or(|b| hit.distance < b.1.distance)
+        {
+            best = Some((i, hit));
+        }
+    }
+    best
 }
 
-/// Ray test against a tank's hull + turret hit boxes. `dir` must be normalized.
-/// Returns `(distance, world_normal)` of the closest entry point within `max_dist`.
-pub fn ray_vs_tank(tank: &TankState, origin: Vec3, dir: Vec3, max_dist: f32) -> Option<(f32, Vec3)> {
-    // Broad phase: bounding sphere around the tank
-    let center = tank.position + Vec3::new(0.0, 1.3, 0.0);
-    let to_c = center - origin;
-    let along = to_c.dot(dir).clamp(0.0, max_dist);
-    let closest = origin + dir * along;
-    if closest.distance_squared(center) > 4.2 * 4.2 {
-        return None;
-    }
-
-    let hull = ray_vs_oriented_box(
-        origin,
-        dir,
-        max_dist,
-        tank.position,
-        tank.hull_rotation(),
-        HULL_BOX_MIN,
-        HULL_BOX_MAX,
-    );
-    let turret = ray_vs_oriented_box(
-        origin,
-        dir,
-        max_dist,
-        tank.turret_world_position(),
-        tank.turret_world_rotation(),
-        TURRET_BOX_MIN,
-        TURRET_BOX_MAX,
-    );
-    match (hull, turret) {
-        (Some(h), Some(t)) => Some(if h.0 <= t.0 { h } else { t }),
-        (h, t) => h.or(t),
-    }
-}
-
-/// Finds the closest tank hit along a ray, skipping `ignore` (usually the shooter).
+/// Convenience raycast returning `(tank_index, distance, world_normal)`.
 pub fn raycast_tanks(
     tanks: &[TankUnit],
     origin: Vec3,
@@ -449,19 +375,8 @@ pub fn raycast_tanks(
     max_dist: f32,
     ignore: Option<TankId>,
 ) -> Option<(usize, f32, Vec3)> {
-    let mut best: Option<(usize, f32, Vec3)> = None;
-    for (i, t) in tanks.iter().enumerate() {
-        if Some(t.id) == ignore {
-            continue;
-        }
-        let limit = best.map_or(max_dist, |b| b.1);
-        if let Some((d, n)) = ray_vs_tank(&t.state, origin, dir, limit)
-            && best.is_none_or(|b| d < b.1)
-        {
-            best = Some((i, d, n));
-        }
-    }
-    best
+    raycast_tanks_armor(tanks, origin, dir, max_dist, ignore)
+        .map(|(i, h)| (i, h.distance, h.geom_normal_world))
 }
 
 #[inline]
@@ -508,7 +423,6 @@ pub fn resolve_tank_collisions(tanks: &mut [TankUnit], world: &VoxelWorld) {
                         best_n = if dist > 1e-4 {
                             (ddx / dist, ddz / dist)
                         } else {
-                            // Perfectly stacked: separate along hull right axis deterministically
                             (a.state.hull_yaw.cos(), -a.state.hull_yaw.sin())
                         };
                     }
@@ -538,7 +452,6 @@ pub fn resolve_tank_collisions(tanks: &mut [TankUnit], world: &VoxelWorld) {
                     unit.state.position.x = new_x;
                     unit.state.position.z = new_z;
                 }
-                // Damp velocity component driving into the other tank
                 let fwd_x = -yaw.sin() * unit.state.forward_speed;
                 let fwd_z = -yaw.cos() * unit.state.forward_speed;
                 if fwd_x * nx + fwd_z * nz < 0.0 {

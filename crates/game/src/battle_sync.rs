@@ -22,7 +22,7 @@ impl Plugin for BattleSimPlugin {
             .init_resource::<BattleControlResource>()
             .init_resource::<PendingSimEvents>()
             .add_systems(FixedUpdate, step_simulation)
-            .add_systems(PostUpdate, clear_battle_restarted_flag);
+            .add_systems(PostUpdate, clear_pending_sim_events);
     }
 }
 
@@ -90,10 +90,7 @@ fn step_simulation(
         control.restart_requested = false;
         input.take_for_step();
         sim.0.restart_battle();
-        events.fired_shots.clear();
-        events.impacts.clear();
-        events.tank_hits.clear();
-        events.kills.clear();
+        events.clear_frame_events();
         events.battle_restarted = true;
         return;
     }
@@ -107,14 +104,14 @@ fn step_simulation(
     if !sim.0.recent_impacts.is_empty() {
         events.impacts.append(&mut sim.0.recent_impacts);
     }
-    if !sim.0.recent_tank_hits.is_empty() {
-        events.tank_hits.append(&mut sim.0.recent_tank_hits);
+    if !sim.0.recent_hit_reports.is_empty() {
+        events.hit_reports.append(&mut sim.0.recent_hit_reports);
     }
     if !sim.0.recent_kills.is_empty() {
         events.kills.append(&mut sim.0.recent_kills);
     }
 }
 
-fn clear_battle_restarted_flag(mut events: ResMut<PendingSimEvents>) {
-    events.battle_restarted = false;
+fn clear_pending_sim_events(mut events: ResMut<PendingSimEvents>) {
+    events.clear_frame_events();
 }

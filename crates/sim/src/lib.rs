@@ -1,7 +1,9 @@
 pub mod ai;
 pub mod ballistics;
 pub mod battle;
+pub mod damage;
 pub mod map_gen;
+pub mod shell;
 pub mod sim_world;
 pub mod tank;
 
@@ -9,15 +11,22 @@ pub use ai::{BotBrain, BotMode, BotObjective, NAV_CELL_SIZE, NavGrid};
 pub use ballistics::{FIXED_DT, GRAVITY, ImpactEvent, Projectile};
 pub use battle::{
     BATTLE_TIME_LIMIT, BattleMode, BattleOutcome, BattleState, CAPTURE_RATE_PER_SEC,
-    CaptureZoneState, KILL_TICKET_PENALTY, KillEvent, MAX_TANKS, STAGE3_HITS_TO_DESTROY,
-    START_TICKETS, TankHitEvent, TankId, TankUnit, Team, VISION_RANGE, ZONE_BLEED_PER_SEC,
-    ray_vs_tank, raycast_tanks, resolve_tank_collisions,
+    CaptureZoneState, KILL_TICKET_PENALTY, KillEvent, MAX_TANKS, START_TICKETS, SimRng, TankId,
+    TankUnit, Team, VISION_RANGE, ZONE_BLEED_PER_SEC, ray_vs_tank, raycast_tanks,
+    raycast_tanks_armor, resolve_tank_collisions,
+};
+pub use damage::{
+    ArmorHit, ArmorType, CREW_TRANSFER_TIME, CrewMemberState, CrewRole, DamageModifiers,
+    FIRE_BURNOUT_TIME, HitOutcome, HitReport, KillReason, MIN_OPERATIONAL_CREW, ModuleHealth,
+    ModuleKind, ModuleState, NO_LOADER_RELOAD_MULT, PartFrame, TankDamageState,
+    raycast_tank_armor, resolve_ap_impact,
 };
 pub use map_gen::{
     CaptureZoneDef, MapMetadata, MinimapData, TacticalPosition, TacticalPositionKind,
     default_metadata_for_world, generate_european_valley_map, generate_flat_proving_ground,
     generate_minimap_data,
 };
+pub use shell::{ShellKind, ShellSpec};
 pub use sim_world::SimWorld;
 pub use tank::{FiredShot, TankConfig, TankInput, TankState, wrap_angle};
 
@@ -501,40 +510,55 @@ mod tests {
     }
 
     #[test]
-    fn direct_hits_destroy_enemy_tank_in_three_shots_and_emit_kill_events() {
+    fn ap_penetration_destroys_enemy_tank_via_war_thunder_crew_or_ammo_detonation() {
         let voxels = generate_flat_proving_ground(128);
         let models = build_basic_tank_models();
         let cfg = TankConfig::stage1_basic(&models);
         let map = default_metadata_for_world(&voxels, "duel", "Duel");
         let mut sim = SimWorld::new_team_battle(voxels, map, cfg, 1);
 
-        // Disable Axis bot brain steering/movement and position target directly 50 m ahead
+        // Position stationary enemy tank broadside 50 m ahead so AP penetrates 42 mm side armor cleanly
         sim.brains[1] = None;
         sim.tanks[1].state.position = Vec3::new(0.0, 0.0, -50.0);
-        sim.tanks[1].state.hull_yaw = std::f32::consts::PI;
+        sim.tanks[1].state.hull_yaw = std::f32::consts::FRAC_PI_2;
 
-        let target_aim = sim.tanks[1].aim_center();
-        let mut total_hits = 0usize;
+        // Sweep aim across crew & fighting compartment on each reload (strictly no HP bar!)
+        let aim_points = [
+            Vec3::new(-0.9, 1.0, -50.0), // Hull front crew / ammo
+            Vec3::new(0.1, 1.7, -50.0),  // Turret gunner / loader / commander
+            Vec3::new(0.0, 0.9, -50.0),  // Center ammo racks
+            Vec3::new(-0.3, 1.8, -50.0), // Turret ring / commander
+        ];
+        let mut shot_idx = 0usize;
+        let mut total_pens = 0usize;
         let mut total_kills = 0usize;
-        for _ in 0..1000 {
+        for _ in 0..2200 {
+            let aim = aim_points[shot_idx % aim_points.len()];
             let fire = sim.player_tank().is_loaded();
+            if fire {
+                shot_idx += 1;
+            }
             sim.step_fixed(
                 FIXED_DT,
                 TankInput {
-                    aim_world_point: target_aim,
+                    aim_world_point: aim,
                     fire,
                     ..Default::default()
                 },
             );
-            total_hits += sim.recent_tank_hits.iter().filter(|h| h.damaged).count();
+            total_pens += sim
+                .recent_hit_reports
+                .iter()
+                .filter(|r| !r.inert_hit && r.outcome == HitOutcome::Penetration)
+                .count();
             total_kills += sim.recent_kills.len();
             if sim.battle.is_over() {
                 break;
             }
         }
 
-        assert_eq!(total_hits, STAGE3_HITS_TO_DESTROY as usize);
-        assert_eq!(total_kills, 1);
+        assert!(total_pens >= 1, "75mm AP must penetrate 42mm side armor");
+        assert_eq!(total_kills, 1, "enemy must be destroyed via WT crew KO or ammo detonation");
         assert!(!sim.tanks[1].alive);
         assert_eq!(sim.player_unit().kills, 1);
         assert_eq!(sim.battle.outcome, BattleOutcome::Victory(Team::Allies));
@@ -643,5 +667,239 @@ mod tests {
         assert_eq!(sim.battle.allies_tickets, START_TICKETS);
         assert_eq!(sim.battle.axis_tickets, START_TICKETS);
         assert!(sim.battle.zones.iter().all(|z| z.owner.is_none() && z.progress == 0.0));
+    }
+
+    #[test]
+    fn ap_de_marre_overmatch_and_ricochet_curves_behave_realistically() {
+        let ap = ShellSpec::basic_75mm_ap();
+
+        // De Marre velocity decay: slower shell loses penetration
+        let pen_0m = ap.penetration_at_speed(ap.muzzle_velocity);
+        let pen_slow = ap.penetration_at_speed(ap.muzzle_velocity * 0.8);
+        assert!(pen_0m > 105.0 && pen_0m < 112.0);
+        assert!(pen_slow < pen_0m * 0.78);
+
+        // Thick 55mm UFP plate at 75 deg grazing angle guarantees ricochet
+        assert!(ap.ricochet_chance(75.0, 55.0) >= 0.99);
+        assert_eq!(ap.ricochet_chance(45.0, 55.0), 0.0);
+
+        // Triple overmatch: 75mm shell vs 20mm roof (3.75x) cannot ricochet even at 78 deg!
+        assert_eq!(ap.ricochet_chance(78.0, 20.0), 0.0);
+        // Double overmatch: 75mm vs 35mm rear (2.14x) cuts ricochet chance sharply
+        assert!(ap.ricochet_chance(70.0, 35.0) < 0.35);
+
+        // Sloped effective armor increases dramatically with obliquity & CHA multiplier (0.94)
+        let eff_flat = ap.effective_armor_mm(55.0, 0.0, ArmorType::Rha.multiplier());
+        let eff_52 = ap.effective_armor_mm(55.0, 52.0, ArmorType::Rha.multiplier());
+        let eff_cha = ap.effective_armor_mm(55.0, 0.0, ArmorType::Cha.multiplier());
+        assert!((eff_flat - 55.0).abs() < 0.1);
+        assert!(eff_52 > 80.0 && eff_52 < 86.0, "55mm @ 52 deg should be ~82mm, got {eff_52}");
+        assert!(eff_cha < eff_flat);
+    }
+
+    #[test]
+    fn angling_hull_causes_ufp_ricochet_or_nonpen_while_flat_side_penetrates() {
+        let models = build_basic_tank_models();
+        let cfg = TankConfig::stage1_basic(&models);
+        let ap = ShellSpec::basic_75mm_ap();
+
+        // Case 1: Tank angled at 40 deg yaw — incoming shell strikes sloped front UFP at compound >61 deg
+        let yaw = 40.0f32.to_radians();
+        let angled_tank = TankState::new(cfg.clone(), Vec3::ZERO, yaw);
+        let mut dmg_angled = TankDamageState::basic_medium_tank();
+        let dir = Vec3::new(0.0, 0.0, 1.0);
+        // Front center of hull in world space: hull_rot * (0, 1.05, -2.6)
+        let ufp_world = angled_tank.hull_rotation() * Vec3::new(0.0, 1.05, -2.6);
+        let origin = Vec3::new(ufp_world.x, ufp_world.y, -10.0);
+        let hit = raycast_tank_armor(&angled_tank, origin, dir, 20.0, false, true)
+            .expect("ray should hit angled hull UFP");
+        assert_eq!(hit.plate_name, "Hull UFP");
+        let mut rng = SimRng::new(42);
+        let report = resolve_ap_impact(
+            TankId(0),
+            Team::Allies,
+            TankId(1),
+            "Target",
+            Team::Axis,
+            true,
+            &angled_tank,
+            &mut dmg_angled,
+            &ap,
+            hit,
+            dir,
+            760.0,
+            &mut rng,
+        );
+        assert!(
+            matches!(report.outcome, HitOutcome::Ricochet | HitOutcome::NonPenetration),
+            "heavily angled UFP should deflect or stop AP, got {:?} on {} (angle={:.1}, eff={:.1} vs pen={:.1})",
+            report.outcome,
+            report.plate_name,
+            report.impact_angle_deg,
+            report.effective_armor_mm,
+            report.penetration_mm
+        );
+        assert_eq!(dmg_angled.alive_crew_count(), 5);
+
+        // Case 2: Flat 90 deg broadside into 42 mm hull side penetrates and damages interior
+        let side_tank = TankState::new(cfg, Vec3::ZERO, std::f32::consts::FRAC_PI_2);
+        let mut dmg_side = TankDamageState::basic_medium_tank();
+        let side_dir = Vec3::new(0.0, 0.0, -1.0);
+        let hit2 = raycast_tank_armor(&side_tank, Vec3::new(0.3, 0.95, 8.0), side_dir, 20.0, false, true)
+            .expect("ray should hit broadside hull");
+        let report2 = resolve_ap_impact(
+            TankId(0),
+            Team::Allies,
+            TankId(1),
+            "Target",
+            Team::Axis,
+            true,
+            &side_tank,
+            &mut dmg_side,
+            &ap,
+            hit2,
+            side_dir,
+            760.0,
+            &mut rng,
+        );
+        assert_eq!(report2.outcome, HitOutcome::Penetration);
+        assert!(
+            !report2.damaged_modules.is_empty() || !report2.killed_crew.is_empty(),
+            "penetrating broadside AP + spall cone must damage internal modules or crew"
+        );
+    }
+
+    #[test]
+    fn crew_replacement_takes_six_seconds_and_under_two_crew_destroys_tank() {
+        let mut dmg = TankDamageState::basic_medium_tank();
+        let mut rng = SimRng::new(7);
+
+        // Knock out Driver: tank immediately loses driving ability and starts 6s transfer
+        dmg.crew[0].apply_damage(100.0);
+        dmg.ensure_crew_transfers_started();
+        assert!(!dmg.mobility_modifiers().can_drive);
+        assert!((dmg.driver_transfer_timer - CREW_TRANSFER_TIME).abs() < 0.05);
+
+        // Advance 3 seconds: still replacing
+        for _ in 0..180 {
+            assert!(dmg.tick_ongoing(FIXED_DT, &mut rng).is_none());
+        }
+        assert!(!dmg.mobility_modifiers().can_drive);
+
+        // Advance 3.5 more seconds: Radio Operator replaces Driver, driving restored!
+        for _ in 0..210 {
+            assert!(dmg.tick_ongoing(FIXED_DT, &mut rng).is_none());
+        }
+        assert!(dmg.mobility_modifiers().can_drive);
+        assert_eq!(dmg.alive_crew_count(), 4);
+
+        // Knock out Loader: reload slows by 1.8x
+        let loader_idx = dmg
+            .crew
+            .iter()
+            .position(|c| c.alive && c.active_seat == CrewRole::Loader)
+            .unwrap();
+        dmg.crew[loader_idx].apply_damage(100.0);
+        assert!((dmg.mobility_modifiers().reload_time_scale - NO_LOADER_RELOAD_MULT).abs() < 0.05);
+
+        // Reduce surviving crew to 1 (< MIN_OPERATIONAL_CREW): instant CrewKnockedOut
+        let mut alive_left = dmg.alive_crew_count();
+        for c in &mut dmg.crew {
+            if c.alive && alive_left > 1 {
+                c.apply_damage(100.0);
+                alive_left -= 1;
+            }
+        }
+        assert_eq!(dmg.alive_crew_count(), 1);
+        assert_eq!(
+            dmg.tick_ongoing(FIXED_DT, &mut rng),
+            Some(KillReason::CrewKnockedOut)
+        );
+    }
+
+    #[test]
+    fn ammo_rack_detonation_blows_turret_off_and_fire_burns_out_tank() {
+        // 1. Ammo rack detonation test
+        let models = build_basic_tank_models();
+        let cfg = TankConfig::stage1_basic(&models);
+        let tank = TankState::new(cfg.clone(), Vec3::ZERO, std::f32::consts::FRAC_PI_2);
+        let ap = ShellSpec::basic_75mm_ap();
+
+        let mut detonated = false;
+        for seed in 1u64..20 {
+            let mut dmg = TankDamageState::basic_medium_tank();
+            // Aim straight through hull side at left sponson ammo rack (hull local z = -0.3, y = 0.85)
+            let dir = Vec3::new(0.0, 0.0, -1.0);
+            let origin = Vec3::new(0.3, 0.85, 8.0);
+            let hit = raycast_tank_armor(&tank, origin, dir, 20.0, false, true).unwrap();
+            let mut rng = SimRng::new(seed);
+            let report = resolve_ap_impact(
+                TankId(0),
+                Team::Allies,
+                TankId(1),
+                "AmmoTarget",
+                Team::Axis,
+                true,
+                &tank,
+                &mut dmg,
+                &ap,
+                hit,
+                dir,
+                780.0,
+                &mut rng,
+            );
+            if report.kill_reason == Some(KillReason::AmmoRackDetonation) {
+                assert!(dmg.turret_blown_off, "ammo rack detonation must blow turret off");
+                detonated = true;
+                break;
+            }
+        }
+        assert!(detonated, "direct AP hit into hull ammo rack must detonate ammunition");
+
+        // 2. Active fire burn-out test
+        let mut dmg_fire = TankDamageState::basic_medium_tank();
+        dmg_fire.on_fire = true;
+        dmg_fire.fire_instigator = Some((TankId(0), Team::Allies));
+        let mut rng = SimRng::new(99);
+        let mut kill = None;
+        for _ in 0..(20 * 60) {
+            if let Some(reason) = dmg_fire.tick_ongoing(FIXED_DT, &mut rng) {
+                kill = Some(reason);
+                break;
+            }
+        }
+        assert!(
+            matches!(
+                kill,
+                Some(KillReason::BurnedOut | KillReason::AmmoRackDetonation | KillReason::CrewKnockedOut)
+            ),
+            "unextinguished fire must eventually destroy tank, got {kill:?}"
+        );
+
+        // 3. Broken track & destroyed breech gameplay penalties
+        let mut dmg_mods = TankDamageState::basic_medium_tank();
+        dmg_mods
+            .modules
+            .iter_mut()
+            .find(|m| m.kind == ModuleKind::GunBreech)
+            .unwrap()
+            .apply_damage(200.0);
+        assert!(!dmg_mods.can_fire());
+
+        dmg_mods
+            .modules
+            .iter_mut()
+            .find(|m| m.kind == ModuleKind::LeftTrack)
+            .unwrap()
+            .apply_damage(200.0);
+        assert!(dmg_mods.mobility_modifiers().broken_track_pull.abs() > 0.3);
+
+        dmg_mods
+            .modules
+            .iter_mut()
+            .find(|m| m.kind == ModuleKind::RightTrack)
+            .unwrap()
+            .apply_damage(200.0);
+        assert!(!dmg_mods.can_move());
     }
 }

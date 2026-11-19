@@ -6,9 +6,10 @@ use voxel::{VoxelWorld, raycast_world};
 use crate::ai::{BotBrain, BotContext, BotObjective, NavGrid};
 use crate::ballistics::{ImpactEvent, Projectile};
 use crate::battle::{
-    BattleMode, BattleState, KILL_TICKET_PENALTY, KillEvent, MAX_TANKS, SimRng, TankHitEvent,
-    TankId, TankUnit, Team, VISION_RANGE, raycast_tanks, resolve_tank_collisions,
+    BattleMode, BattleState, KILL_TICKET_PENALTY, KillEvent, MAX_TANKS, SimRng, TankId, TankUnit,
+    Team, VISION_RANGE, raycast_tanks, raycast_tanks_armor, resolve_tank_collisions,
 };
+use crate::damage::{ArmorHit, HitOutcome, HitReport, KillReason, resolve_ap_impact};
 use crate::map_gen::{MapMetadata, default_metadata_for_world};
 use crate::tank::{FiredShot, TankConfig, TankInput, TankState};
 
@@ -38,7 +39,7 @@ pub struct SimWorld {
     pub projectiles: Vec<Projectile>,
     pub recent_impacts: Vec<ImpactEvent>,
     pub recent_shots: Vec<FiredShot>,
-    pub recent_tank_hits: Vec<TankHitEvent>,
+    pub recent_hit_reports: Vec<HitReport>,
     pub recent_kills: Vec<KillEvent>,
     pub tick: u64,
     base_config: TankConfig,
@@ -91,7 +92,7 @@ impl SimWorld {
             projectiles: Vec::new(),
             recent_impacts: Vec::new(),
             recent_shots: Vec::new(),
-            recent_tank_hits: Vec::new(),
+            recent_hit_reports: Vec::new(),
             recent_kills: Vec::new(),
             tick: 0,
             base_config: tank_config,
@@ -110,7 +111,7 @@ impl SimWorld {
         self.projectiles.clear();
         self.recent_impacts.clear();
         self.recent_shots.clear();
-        self.recent_tank_hits.clear();
+        self.recent_hit_reports.clear();
         self.recent_kills.clear();
         self.visibility = [0; MAX_TANKS];
         self.tick = 0;
@@ -207,7 +208,7 @@ impl SimWorld {
         self.tanks.iter().filter(|t| t.team == team).count()
     }
 
-    /// Raycast against both voxel terrain and tank hit boxes; returns the closest hit point.
+    /// Raycast against both voxel terrain and tank armor hitboxes; returns the closest hit point.
     pub fn raycast_scene(
         &self,
         origin: Vec3,
@@ -232,7 +233,7 @@ impl SimWorld {
         self.tick += 1;
         self.recent_impacts.clear();
         self.recent_shots.clear();
-        self.recent_tank_hits.clear();
+        self.recent_hit_reports.clear();
         self.recent_kills.clear();
 
         let team_battle = self.battle.mode == BattleMode::TeamBattle;
@@ -253,7 +254,27 @@ impl SimWorld {
             self.update_visibility();
         }
 
-        // 2. Gather control inputs (player + AI bots)
+        // 2. Ongoing internal crew replacement (6s) and fire burn-out ticks
+        let mut ongoing_kills: Vec<(usize, TankId, Team, KillReason)> = Vec::new();
+        if !over {
+            for i in 0..n {
+                if !self.tanks[i].alive {
+                    continue;
+                }
+                if let Some(reason) = self.tanks[i].damage.tick_ongoing(dt, &mut self.rng) {
+                    let (killer_id, killer_team) = self.tanks[i]
+                        .damage
+                        .fire_instigator
+                        .unwrap_or((self.tanks[i].id, self.tanks[i].team.opposite()));
+                    ongoing_kills.push((i, killer_id, killer_team, reason));
+                }
+            }
+        }
+        for (victim_idx, killer_id, killer_team, reason) in ongoing_kills {
+            self.finalize_tank_destruction(victim_idx, killer_id, killer_team, reason);
+        }
+
+        // 3. Gather control inputs (player + AI bots)
         let mut inputs = [TankInput::default(); MAX_TANKS];
         for (i, input) in inputs.iter_mut().enumerate().take(n) {
             let st = &self.tanks[i].state;
@@ -285,18 +306,25 @@ impl SimWorld {
             }
         }
 
-        // 3. Step every living tank & spawn shells
+        // 4. Step every living tank with active module/crew damage modifiers & spawn AP shells
         for (i, input) in inputs.iter().enumerate().take(n) {
             if !self.tanks[i].alive {
                 continue;
             }
-            if let Some(shot) = self.tanks[i].state.step(dt, *input, &self.voxels) {
+            let mods = self.tanks[i].damage.mobility_modifiers();
+            if let Some(shot) =
+                self.tanks[i]
+                    .state
+                    .step_with_modifiers(dt, *input, &self.voxels, mods, &mut self.rng)
+            {
                 let id = self.next_projectile_id;
                 self.next_projectile_id += 1;
                 self.projectiles.push(Projectile {
                     id,
                     owner: self.tanks[i].id,
                     owner_team: self.tanks[i].team,
+                    shell: shot.shell.clone(),
+                    bounced: false,
                     position: shot.muzzle_position,
                     prev_position: shot.muzzle_position,
                     velocity: shot.velocity,
@@ -308,15 +336,15 @@ impl SimWorld {
             }
         }
 
-        // 4. Tank-vs-tank collisions (wrecks act as immovable cover)
+        // 5. Tank-vs-tank collisions (wrecks act as immovable cover)
         if n > 1 {
             resolve_tank_collisions(&mut self.tanks, &self.voxels);
         }
 
-        // 5. Ballistics with swept terrain + tank hit detection
+        // 6. Ballistics with swept terrain + full Stage 4 armor/spall/ricochet resolution
         self.step_projectiles(dt);
 
-        // 6. Capture zones, tickets, victory
+        // 7. Capture zones, tickets, victory
         self.battle.update(dt, &self.tanks);
     }
 
@@ -354,7 +382,7 @@ impl SimWorld {
         let mut surviving = Vec::with_capacity(self.projectiles.len());
         let (min_x, max_x, min_z, max_z) = self.voxels.playable_bounds_xz();
         let margin = 120.0;
-        let mut pending_hits: Vec<(Projectile, usize, Vec3, Vec3)> = Vec::new();
+        let mut pending_hits: Vec<(Projectile, usize, ArmorHit, Vec3)> = Vec::new();
 
         for mut proj in self.projectiles.drain(..) {
             let step_vec = proj.integrate(dt);
@@ -366,10 +394,14 @@ impl SimWorld {
                 let dir = step_vec / step_dist;
                 let world_hit = raycast_world(&self.voxels, proj.prev_position, dir, step_dist);
                 let limit = world_hit.map_or(step_dist, |h| h.distance);
-                if let Some((ti, d, normal)) =
-                    raycast_tanks(&self.tanks, proj.prev_position, dir, limit, Some(proj.owner))
-                {
-                    pending_hits.push((proj, ti, proj.prev_position + dir * d, normal));
+                if let Some((ti, armor_hit)) = raycast_tanks_armor(
+                    &self.tanks,
+                    proj.prev_position,
+                    dir,
+                    limit,
+                    Some(proj.owner),
+                ) {
+                    pending_hits.push((proj, ti, armor_hit, dir));
                     continue;
                 }
                 if let Some(hit) = world_hit {
@@ -386,7 +418,6 @@ impl SimWorld {
 
             proj.position = proj.prev_position + step_vec;
 
-            // Despawn projectiles that leave the extended world volume
             let out_of_bounds = proj.position.y < -40.0
                 || proj.position.x < min_x - margin
                 || proj.position.x > max_x + margin
@@ -398,65 +429,119 @@ impl SimWorld {
         }
         self.projectiles = surviving;
 
-        for (proj, ti, point, normal) in pending_hits {
-            self.apply_tank_hit(&proj, ti, point, normal);
+        for (proj, ti, armor_hit, dir) in pending_hits {
+            self.apply_armor_hit(&proj, ti, armor_hit, dir);
         }
     }
 
-    /// Stage 3 stub damage: each enemy hit removes one of [`crate::battle::STAGE3_HITS_TO_DESTROY`]
-    /// hit points. Replaced by the War Thunder module/crew damage model in Stage 4.
-    fn apply_tank_hit(&mut self, proj: &Projectile, target_idx: usize, point: Vec3, normal: Vec3) {
-        let shooter_idx = proj.owner.index();
-        let target = &mut self.tanks[target_idx];
-        let damaged = target.alive && target.team != proj.owner_team;
-        let mut destroyed = false;
-        if damaged {
-            target.hits_remaining = target.hits_remaining.saturating_sub(1);
-            if target.hits_remaining == 0 {
-                target.alive = false;
-                target.state.forward_speed = 0.0;
-                destroyed = true;
-            }
-        }
-        let (target_id, target_team, victim_name) = (target.id, target.team, target.name.clone());
+    fn apply_armor_hit(&mut self, proj: &Projectile, target_idx: usize, hit: ArmorHit, dir: Vec3) {
+        let impact_speed = proj.velocity.length();
+        let target_alive = self.tanks[target_idx].alive;
+        let target_id = self.tanks[target_idx].id;
+        let target_team = self.tanks[target_idx].team;
+        let target_name = self.tanks[target_idx].name.clone();
+        let target_state = self.tanks[target_idx].state.clone();
 
-        self.recent_tank_hits.push(TankHitEvent {
-            shooter_id: proj.owner,
+        let report = resolve_ap_impact(
+            proj.owner,
+            proj.owner_team,
             target_id,
+            &target_name,
             target_team,
-            position: point,
-            normal,
-            damaged,
-            destroyed,
-        });
+            target_alive,
+            &target_state,
+            &mut self.tanks[target_idx].damage,
+            &proj.shell,
+            hit,
+            dir,
+            impact_speed,
+            &mut self.rng,
+        );
 
-        if damaged && let Some(shooter) = self.tanks.get_mut(shooter_idx) {
+        // Spawn visible deflected ricochet tracer so bounces deflect off angled armor in 3D
+        if report.outcome == HitOutcome::Ricochet
+            && !proj.bounced
+            && let Some(rdir) = report.ricochet_dir
+        {
+            let id = self.next_projectile_id;
+            self.next_projectile_id += 1;
+            let start = report.position + rdir * 0.15;
+            self.projectiles.push(Projectile {
+                id,
+                owner: target_id,
+                owner_team: proj.owner_team,
+                shell: proj.shell.clone(),
+                bounced: true,
+                position: start,
+                prev_position: start,
+                velocity: rdir * (impact_speed * 0.45),
+                drag_coeff: proj.drag_coeff * 2.0,
+                age: 0.0,
+                max_lifetime: 2.2,
+            });
+        }
+
+        if !report.inert_hit
+            && matches!(
+                report.outcome,
+                HitOutcome::Penetration | HitOutcome::ExternalModuleHit
+            )
+            && let Some(shooter) = self.tanks.get_mut(proj.owner.index())
+        {
             shooter.hits_landed += 1;
-            if destroyed {
-                shooter.kills += 1;
-            }
         }
-        if destroyed {
-            if self.battle.mode == BattleMode::TeamBattle {
-                let tickets = self.battle.tickets_mut(target_team);
-                *tickets = (*tickets - KILL_TICKET_PENALTY).max(0.0);
-            }
-            let (killer_name, killer_team) = self
-                .tanks
-                .get(shooter_idx)
-                .map(|s| (s.name.clone(), s.team))
-                .unwrap_or_else(|| ("Unknown".to_string(), proj.owner_team));
-            let event = KillEvent {
-                tick: self.tick,
-                killer_id: proj.owner,
-                killer_name,
-                killer_team,
-                victim_id: target_id,
-                victim_name,
-                victim_team: target_team,
-            };
-            self.recent_kills.push(event.clone());
-            self.battle.kill_log.push(event);
+
+        let kill_reason = report.kill_reason;
+        self.recent_hit_reports.push(report);
+
+        if let Some(reason) = kill_reason {
+            self.finalize_tank_destruction(target_idx, proj.owner, proj.owner_team, reason);
         }
+    }
+
+    fn finalize_tank_destruction(
+        &mut self,
+        victim_idx: usize,
+        killer_id: TankId,
+        killer_team: Team,
+        reason: KillReason,
+    ) {
+        if !self.tanks[victim_idx].alive {
+            return;
+        }
+        self.tanks[victim_idx].alive = false;
+        self.tanks[victim_idx].state.forward_speed = 0.0;
+        let victim_id = self.tanks[victim_idx].id;
+        let victim_team = self.tanks[victim_idx].team;
+        let victim_name = self.tanks[victim_idx].name.clone();
+
+        if killer_id != victim_id
+            && let Some(shooter) = self.tanks.get_mut(killer_id.index())
+        {
+            shooter.kills += 1;
+        }
+
+        if self.battle.mode == BattleMode::TeamBattle {
+            let tickets = self.battle.tickets_mut(victim_team);
+            *tickets = (*tickets - KILL_TICKET_PENALTY).max(0.0);
+        }
+
+        let (killer_name, actual_killer_team) = self
+            .tanks
+            .get(killer_id.index())
+            .map(|s| (s.name.clone(), s.team))
+            .unwrap_or_else(|| ("Unknown".to_string(), killer_team));
+        let event = KillEvent {
+            tick: self.tick,
+            killer_id,
+            killer_name,
+            killer_team: actual_killer_team,
+            victim_id,
+            victim_name,
+            victim_team,
+            reason,
+        };
+        self.recent_kills.push(event.clone());
+        self.battle.kill_log.push(event);
     }
 }

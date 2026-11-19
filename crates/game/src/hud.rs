@@ -2,7 +2,9 @@ use bevy::asset::RenderAssetUsages;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::window::PrimaryWindow;
-use sim::{BattleOutcome, MAX_TANKS, START_TICKETS, Team};
+use sim::{
+    BattleOutcome, CrewRole, HitOutcome, MAX_TANKS, ModuleHealth, ModuleKind, START_TICKETS, Team,
+};
 
 use crate::bridge::{BattleControlResource, PendingSimEvents, SimResource, to_bevy_vec3};
 use crate::camera::{CameraMode, MainTankCamera, TankCameraController};
@@ -10,6 +12,27 @@ use crate::camera::{CameraMode, MainTankCamera, TankCameraController};
 const MINIMAP_DISPLAY_PX: f32 = 192.0;
 const KILL_FEED_ROWS: usize = 5;
 const KILL_FEED_TTL_SECS: f32 = 8.0;
+const HIT_CAM_TTL_SECS: f32 = 5.5;
+
+const HUD_CREW_SEATS: [CrewRole; 5] = [
+    CrewRole::Driver,
+    CrewRole::Gunner,
+    CrewRole::Loader,
+    CrewRole::Commander,
+    CrewRole::RadioOperator,
+];
+
+const HUD_MODULES: [ModuleKind; 9] = [
+    ModuleKind::Engine,
+    ModuleKind::Transmission,
+    ModuleKind::LeftTrack,
+    ModuleKind::RightTrack,
+    ModuleKind::FuelTank,
+    ModuleKind::GunBreech,
+    ModuleKind::GunBarrel,
+    ModuleKind::TurretRing,
+    ModuleKind::AmmoRack,
+];
 
 #[derive(Component)]
 struct TelemetryText;
@@ -25,6 +48,24 @@ struct SniperOverlayRoot;
 
 #[derive(Component)]
 struct CursorHintText;
+
+#[derive(Component)]
+struct DamageHeaderText;
+
+#[derive(Component)]
+struct CrewSeatChip(CrewRole);
+
+#[derive(Component)]
+struct ModuleChip(ModuleKind);
+
+#[derive(Component)]
+struct HitCamPanel;
+
+#[derive(Component)]
+struct HitCamTitleText;
+
+#[derive(Component)]
+struct HitCamBodyText;
 
 #[derive(Component)]
 struct MinimapZoneBadge(usize);
@@ -87,9 +128,11 @@ struct KillFeedBuffer {
 }
 
 #[derive(Resource, Default)]
-struct HitFlashBanner {
-    text: String,
-    color: Color,
+struct HitCamState {
+    title: String,
+    title_color: Color,
+    border_color: Color,
+    body: String,
     timer: f32,
 }
 
@@ -98,7 +141,7 @@ pub struct HudPlugin;
 impl Plugin for HudPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<KillFeedBuffer>()
-            .init_resource::<HitFlashBanner>()
+            .init_resource::<HitCamState>()
             .add_systems(
                 Startup,
                 (
@@ -112,6 +155,8 @@ impl Plugin for HudPlugin {
                 Update,
                 (
                     update_hud_telemetry,
+                    update_player_damage_diagram,
+                    update_hit_cam_panel,
                     update_hud_reticles,
                     update_battle_scoreboard,
                     update_kill_feed,
@@ -227,7 +272,7 @@ fn setup_crosshair_and_telemetry(mut commands: Commands, sim: Res<SimResource>) 
                 position_type: PositionType::Absolute,
                 left: Val::Px(14.0),
                 top: Val::Px(12.0),
-                max_width: Val::Px(340.0),
+                max_width: Val::Px(348.0),
                 padding: UiRect::axes(Val::Px(10.0), Val::Px(7.0)),
                 flex_direction: FlexDirection::Column,
                 row_gap: Val::Px(3.0),
@@ -237,9 +282,9 @@ fn setup_crosshair_and_telemetry(mut commands: Commands, sim: Res<SimResource>) 
         ))
         .with_children(|panel| {
             panel.spawn((
-                Text::new(format!("STAGE 3 | {map_title} - 6v6")),
+                Text::new(format!("STAGE 4 | {map_title} - WT DAMAGE & 75MM AP")),
                 TextFont {
-                    font_size: FontSize::Px(13.0),
+                    font_size: FontSize::Px(12.5),
                     ..default()
                 },
                 TextColor(Color::srgb(0.92, 0.82, 0.40)),
@@ -263,57 +308,150 @@ fn setup_crosshair_and_telemetry(mut commands: Commands, sim: Res<SimResource>) 
             ));
         });
 
-    // 5. Bottom-left tank telemetry & reload panel
+    // 5. Bottom-left stack: War Thunder Crew/Module Schematic + Telemetry & Reload
     commands
-        .spawn((
-            Node {
-                position_type: PositionType::Absolute,
-                left: Val::Px(16.0),
-                bottom: Val::Px(16.0),
-                width: Val::Px(286.0),
-                padding: UiRect::all(Val::Px(12.0)),
-                flex_direction: FlexDirection::Column,
-                row_gap: Val::Px(6.0),
-                ..default()
-            },
-            BackgroundColor(Color::srgba(0.07, 0.09, 0.08, 0.78)),
-        ))
-        .with_children(|panel| {
-            panel.spawn((
-                TelemetryText,
-                Text::new("SPD   0 km/h | GEAR N\nGUN   READY\nVIEW  3RD PERSON"),
-                TextFont {
-                    font_size: FontSize::Px(13.0),
-                    ..default()
-                },
-                TextColor(Color::srgb(0.92, 0.95, 0.90)),
-            ));
-
-            panel
+        .spawn(Node {
+            position_type: PositionType::Absolute,
+            left: Val::Px(16.0),
+            bottom: Val::Px(16.0),
+            width: Val::Px(300.0),
+            flex_direction: FlexDirection::Column,
+            row_gap: Val::Px(8.0),
+            ..default()
+        })
+        .with_children(|stack| {
+            // 5a. War Thunder Crew & Internal Module Damage Schematic (strictly no HP bar!)
+            stack
                 .spawn((
                     Node {
                         width: Val::Percent(100.0),
-                        height: Val::Px(8.0),
+                        padding: UiRect::all(Val::Px(9.0)),
+                        flex_direction: FlexDirection::Column,
+                        row_gap: Val::Px(6.0),
+                        border: UiRect::all(Val::Px(1.0)),
                         ..default()
                     },
-                    BackgroundColor(Color::srgba(0.22, 0.24, 0.22, 0.9)),
+                    BorderColor::all(Color::srgba(0.55, 0.60, 0.54, 0.50)),
+                    BackgroundColor(Color::srgba(0.06, 0.08, 0.07, 0.82)),
                 ))
-                .with_children(|bar_bg| {
-                    bar_bg.spawn((
-                        ReloadFillBar,
-                        Node {
-                            width: Val::Percent(100.0),
-                            height: Val::Percent(100.0),
+                .with_children(|diag| {
+                    diag.spawn((
+                        DamageHeaderText,
+                        Text::new("CREW 5/5 | MODULES NOMINAL"),
+                        TextFont {
+                            font_size: FontSize::Px(11.5),
                             ..default()
                         },
-                        BackgroundColor(Color::srgb(0.28, 0.88, 0.36)),
+                        TextColor(Color::srgb(0.76, 0.94, 0.78)),
                     ));
+
+                    // Crew seat chips row
+                    diag.spawn(Node {
+                        width: Val::Percent(100.0),
+                        column_gap: Val::Px(4.0),
+                        flex_wrap: FlexWrap::Wrap,
+                        ..default()
+                    })
+                    .with_children(|row| {
+                        for seat in HUD_CREW_SEATS {
+                            row.spawn((
+                                CrewSeatChip(seat),
+                                Node {
+                                    padding: UiRect::axes(Val::Px(6.0), Val::Px(2.0)),
+                                    border: UiRect::all(Val::Px(1.0)),
+                                    ..default()
+                                },
+                                BorderColor::all(Color::srgb(0.32, 0.74, 0.40)),
+                                BackgroundColor(Color::srgba(0.14, 0.34, 0.18, 0.85)),
+                                Text::new(seat.short_label()),
+                                TextFont {
+                                    font_size: FontSize::Px(10.5),
+                                    ..default()
+                                },
+                                TextColor(Color::WHITE),
+                            ));
+                        }
+                    });
+
+                    // Modules status chips (2 compact rows)
+                    diag.spawn(Node {
+                        width: Val::Percent(100.0),
+                        column_gap: Val::Px(4.0),
+                        row_gap: Val::Px(4.0),
+                        flex_wrap: FlexWrap::Wrap,
+                        ..default()
+                    })
+                    .with_children(|grid| {
+                        for kind in HUD_MODULES {
+                            grid.spawn((
+                                ModuleChip(kind),
+                                Node {
+                                    padding: UiRect::axes(Val::Px(6.0), Val::Px(2.0)),
+                                    border: UiRect::all(Val::Px(1.0)),
+                                    ..default()
+                                },
+                                BorderColor::all(Color::srgba(0.50, 0.54, 0.50, 0.75)),
+                                BackgroundColor(Color::srgba(0.20, 0.23, 0.21, 0.88)),
+                                Text::new(kind.short_label()),
+                                TextFont {
+                                    font_size: FontSize::Px(10.5),
+                                    ..default()
+                                },
+                                TextColor(Color::srgb(0.86, 0.88, 0.85)),
+                            ));
+                        }
+                    });
+                });
+
+            // 5b. Telemetry & Cannon Reload Panel
+            stack
+                .spawn((
+                    Node {
+                        width: Val::Percent(100.0),
+                        padding: UiRect::all(Val::Px(10.0)),
+                        flex_direction: FlexDirection::Column,
+                        row_gap: Val::Px(6.0),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgba(0.07, 0.09, 0.08, 0.80)),
+                ))
+                .with_children(|panel| {
+                    panel.spawn((
+                        TelemetryText,
+                        Text::new("SPD   0 km/h | GEAR N\nSHELL 75mm M72 AP\nGUN   READY"),
+                        TextFont {
+                            font_size: FontSize::Px(12.5),
+                            ..default()
+                        },
+                        TextColor(Color::srgb(0.92, 0.95, 0.90)),
+                    ));
+
+                    panel
+                        .spawn((
+                            Node {
+                                width: Val::Percent(100.0),
+                                height: Val::Px(8.0),
+                                ..default()
+                            },
+                            BackgroundColor(Color::srgba(0.22, 0.24, 0.22, 0.9)),
+                        ))
+                        .with_children(|bar_bg| {
+                            bar_bg.spawn((
+                                ReloadFillBar,
+                                Node {
+                                    width: Val::Percent(100.0),
+                                    height: Val::Percent(100.0),
+                                    ..default()
+                                },
+                                BackgroundColor(Color::srgb(0.28, 0.88, 0.36)),
+                            ));
+                        });
                 });
         });
 }
 
 fn setup_battle_scoreboard_and_feed(mut commands: Commands, sim: Res<SimResource>) {
-    // Top-center War Thunder-style ticket & capture zone bar
+    // Top-center War Thunder ticket & capture zone bar
     commands
         .spawn(Node {
             position_type: PositionType::Absolute,
@@ -429,7 +567,7 @@ fn setup_battle_scoreboard_and_feed(mut commands: Commands, sim: Res<SimResource
 
             wrapper.spawn((
                 BattleSubStatusText,
-                Text::new("00:00 | KILLS 0 | HITS 0"),
+                Text::new("00:00 | KILLS 0 | PENS 0"),
                 TextFont {
                     font_size: FontSize::Px(12.0),
                     ..default()
@@ -443,7 +581,7 @@ fn setup_battle_scoreboard_and_feed(mut commands: Commands, sim: Res<SimResource
             ));
         });
 
-    // Top-right kill feed rows
+    // Top-right stack: Kill Feed + War Thunder Hit-Cam Damage Report Panel
     commands
         .spawn(Node {
             position_type: PositionType::Absolute,
@@ -451,10 +589,11 @@ fn setup_battle_scoreboard_and_feed(mut commands: Commands, sim: Res<SimResource
             top: Val::Px(12.0),
             flex_direction: FlexDirection::Column,
             align_items: AlignItems::FlexEnd,
-            row_gap: Val::Px(4.0),
+            row_gap: Val::Px(6.0),
             ..default()
         })
         .with_children(|col| {
+            // Kill feed rows
             for row in 0..KILL_FEED_ROWS {
                 col.spawn((
                     KillFeedRow(row),
@@ -466,17 +605,54 @@ fn setup_battle_scoreboard_and_feed(mut commands: Commands, sim: Res<SimResource
                     BackgroundColor(Color::srgba(0.06, 0.08, 0.07, 0.78)),
                     Text::new(""),
                     TextFont {
-                        font_size: FontSize::Px(12.0),
+                        font_size: FontSize::Px(11.5),
                         ..default()
                     },
                     TextColor(Color::WHITE),
                 ));
             }
+
+            // Hit-Cam / Shell Impact Report Panel (shown for 5.5s on player shots)
+            col.spawn((
+                HitCamPanel,
+                Node {
+                    display: Display::None,
+                    width: Val::Px(286.0),
+                    padding: UiRect::all(Val::Px(9.0)),
+                    margin: UiRect::top(Val::Px(6.0)),
+                    flex_direction: FlexDirection::Column,
+                    row_gap: Val::Px(4.0),
+                    border: UiRect::all(Val::Px(1.5)),
+                    ..default()
+                },
+                BorderColor::all(Color::srgb(0.35, 0.90, 0.45)),
+                BackgroundColor(Color::srgba(0.05, 0.07, 0.06, 0.88)),
+            ))
+            .with_children(|card| {
+                card.spawn((
+                    HitCamTitleText,
+                    Text::new("PENETRATION"),
+                    TextFont {
+                        font_size: FontSize::Px(13.0),
+                        ..default()
+                    },
+                    TextColor(Color::srgb(0.35, 0.95, 0.45)),
+                ));
+                card.spawn((
+                    HitCamBodyText,
+                    Text::new(""),
+                    TextFont {
+                        font_size: FontSize::Px(11.5),
+                        ..default()
+                    },
+                    TextColor(Color::srgb(0.90, 0.93, 0.88)),
+                ));
+            });
         });
 }
 
 fn setup_overhead_markers_and_modal(mut commands: Commands) {
-    // Pooled 3D-projected overhead tank tags (zero dynamic entity allocation during gameplay)
+    // Pooled 3D-projected overhead tank tags (strictly NO HP bar!)
     for i in 0..MAX_TANKS {
         commands.spawn((
             OverheadMarker(i),
@@ -500,7 +676,7 @@ fn setup_overhead_markers_and_modal(mut commands: Commands) {
         ));
     }
 
-    // Centered End-of-Battle overlay modal (hidden until battle ends)
+    // Centered End-of-Battle overlay modal
     commands
         .spawn((
             BattleEndOverlay,
@@ -674,7 +850,6 @@ fn setup_minimap_hud(
                             });
                     }
 
-                    // Gun & hull heading pips for the player
                     map_box.spawn((
                         MinimapGunHeadingPip,
                         Node {
@@ -701,7 +876,6 @@ fn setup_minimap_hud(
                         BackgroundColor(Color::srgb(0.75, 1.0, 0.65)),
                     ));
 
-                    // Pooled minimap dots for all tanks (player rendered on top as slot 0)
                     for i in (0..MAX_TANKS).rev() {
                         let is_player = i == 0;
                         let sz = if is_player { 8.0 } else { 6.0 };
@@ -725,48 +899,34 @@ fn setup_minimap_hud(
         });
 }
 
-#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+#[allow(clippy::type_complexity)]
 fn update_hud_telemetry(
-    time: Res<Time>,
     sim: Res<SimResource>,
     cam_ctrl: Res<TankCameraController>,
-    pending: Res<PendingSimEvents>,
-    mut hit_flash: ResMut<HitFlashBanner>,
     mut texts: ParamSet<(
         Query<&mut Text, With<TelemetryText>>,
         Query<(&mut Text, &mut TextColor), With<CursorHintText>>,
     )>,
     mut reload_bar_q: Query<(&mut Node, &mut BackgroundColor), With<ReloadFillBar>>,
 ) {
-    let player_id = sim.0.player_unit().id;
-    let tank = sim.0.player_tank();
-
-    if pending.battle_restarted {
-        hit_flash.timer = 0.0;
-    }
-    for hit in &pending.tank_hits {
-        if hit.shooter_id == player_id && hit.damaged {
-            if hit.destroyed {
-                hit_flash.text = "TARGET DESTROYED!".to_string();
-                hit_flash.color = Color::srgb(1.0, 0.42, 0.30);
-                hit_flash.timer = 2.6;
-            } else {
-                hit_flash.text = "DIRECT HIT!".to_string();
-                hit_flash.color = Color::srgb(0.98, 0.86, 0.32);
-                hit_flash.timer = 1.4;
-            }
-        }
-    }
-    hit_flash.timer = (hit_flash.timer - time.delta_secs()).max(0.0);
+    let player = sim.0.player_unit();
+    let tank = &player.state;
+    let mods = player.damage.mobility_modifiers();
 
     if let Ok(mut text) = texts.p0().single_mut() {
-        if !sim.0.player_unit().alive {
-            text.0 = "VEHICLE KNOCKED OUT\nSPECTATING BATTLE\nPress Enter to Restart".to_string();
+        if !player.alive {
+            text.0 = "VEHICLE DESTROYED\nSPECTATING BATTLE\nPress Enter to Restart".to_string();
         } else {
-            let reload_str = if tank.is_loaded() {
+            let gun_str = if !mods.can_fire {
+                if !player.damage.has_active_seat(CrewRole::Gunner) {
+                    "NO GUNNER".to_string()
+                } else {
+                    "GUN DISABLED".to_string()
+                }
+            } else if tank.is_loaded() {
                 "READY".to_string()
             } else {
-                format!("RELOAD {:.1}s", tank.reload_remaining)
+                format!("RELOAD {:.1}s", tank.reload_remaining * mods.reload_time_scale)
             };
             let view_str = match cam_ctrl.mode {
                 CameraMode::ThirdPerson if cam_ctrl.free_look => "FREE LOOK",
@@ -781,8 +941,9 @@ fn update_hud_telemetry(
             } else {
                 ""
             };
+            let sh = &tank.config.shell;
             text.0 = format!(
-                "SPD {:>3.0} km/h | GEAR {}{}\nALT {:>+4.1}m | SLOPE {:>+4.1} deg\nTUR {:>+4.0} deg | ELV {:>+4.1} deg\nGUN {} | VIEW {}",
+                "SPD {:>3.0} km/h | GEAR {}{}\nALT {:>+4.1}m | SLOPE {:>+4.1} deg\nTUR {:>+4.0} deg | ELV {:>+4.1} deg\nSHELL {} ({:.0}mm)\nGUN {} | {}",
                 tank.speed_kmh().abs(),
                 tank.gear_label(),
                 ford_tag,
@@ -790,16 +951,18 @@ fn update_hud_telemetry(
                 slope_deg,
                 turret_deg,
                 elev_deg,
-                reload_str,
+                sh.name,
+                sh.penetration_0m_mm,
+                gun_str,
                 view_str,
             );
         }
     }
 
     if let Ok((mut hint, mut color)) = texts.p1().single_mut() {
-        if hit_flash.timer > 0.0 {
-            hint.0 = hit_flash.text.clone();
-            color.0 = hit_flash.color;
+        if player.damage.on_fire && player.alive {
+            hint.0 = "!! ENGINE / FUEL FIRE !!" .to_string();
+            color.0 = Color::srgb(1.0, 0.35, 0.20);
         } else if cam_ctrl.cursor_locked {
             hint.0 = "Mouse locked (press Esc to unlock cursor)".to_string();
             color.0 = Color::srgb(0.68, 0.88, 0.72);
@@ -811,13 +974,210 @@ fn update_hud_telemetry(
 
     if let Ok((mut node, mut bg)) = reload_bar_q.single_mut() {
         node.width = Val::Percent(tank.reload_progress() * 100.0);
-        bg.0 = if !sim.0.player_unit().alive {
-            Color::srgb(0.55, 0.22, 0.20)
+        bg.0 = if !player.alive || !mods.can_fire {
+            Color::srgb(0.75, 0.22, 0.20)
         } else if tank.is_loaded() {
             Color::srgb(0.28, 0.88, 0.36)
         } else {
             Color::srgb(0.92, 0.62, 0.16)
         };
+    }
+}
+
+#[allow(clippy::type_complexity)]
+fn update_player_damage_diagram(
+    sim: Res<SimResource>,
+    mut q: ParamSet<(
+        Query<(&mut Text, &mut TextColor), With<DamageHeaderText>>,
+        Query<(&CrewSeatChip, &mut BackgroundColor, &mut BorderColor, &mut TextColor)>,
+        Query<(&ModuleChip, &mut BackgroundColor, &mut BorderColor, &mut TextColor)>,
+    )>,
+) {
+    let player = sim.0.player_unit();
+    let dmg = &player.damage;
+    let alive_crew = dmg.alive_crew_count();
+    let total_crew = dmg.total_crew_count();
+
+    if let Ok((mut header, mut color)) = q.p0().single_mut() {
+        if !player.alive {
+            header.0 = if dmg.turret_blown_off {
+                "AMMO RACK DETONATED".to_string()
+            } else {
+                format!("CREW {alive_crew}/{total_crew} | KNOCKED OUT")
+            };
+            color.0 = Color::srgb(0.98, 0.34, 0.30);
+        } else if dmg.on_fire {
+            header.0 = format!("CREW {alive_crew}/{total_crew} | !! ON FIRE !!");
+            color.0 = Color::srgb(1.0, 0.42, 0.18);
+        } else if dmg.gunner_transfer_timer > 0.0 {
+            header.0 = format!(
+                "CREW {alive_crew}/{total_crew} | REPLACING GUNNER {:.1}s",
+                dmg.gunner_transfer_timer
+            );
+            color.0 = Color::srgb(0.98, 0.82, 0.30);
+        } else if dmg.driver_transfer_timer > 0.0 {
+            header.0 = format!(
+                "CREW {alive_crew}/{total_crew} | REPLACING DRIVER {:.1}s",
+                dmg.driver_transfer_timer
+            );
+            color.0 = Color::srgb(0.98, 0.82, 0.30);
+        } else {
+            let status = if alive_crew == total_crew {
+                "COMBAT READY"
+            } else {
+                "CREW REDUCED"
+            };
+            header.0 = format!("CREW {alive_crew}/{total_crew} | {status}");
+            color.0 = if alive_crew <= 2 {
+                Color::srgb(0.98, 0.45, 0.34)
+            } else if alive_crew < total_crew {
+                Color::srgb(0.95, 0.82, 0.34)
+            } else {
+                Color::srgb(0.76, 0.94, 0.78)
+            };
+        }
+    }
+
+    for (chip, mut bg, mut border, mut tc) in &mut q.p1() {
+        let manned = dmg.has_active_seat(chip.0);
+        let replacing = (chip.0 == CrewRole::Driver && dmg.driver_transfer_timer > 0.0)
+            || (chip.0 == CrewRole::Gunner && dmg.gunner_transfer_timer > 0.0);
+        if manned {
+            bg.0 = Color::srgba(0.14, 0.36, 0.18, 0.88);
+            *border = BorderColor::all(Color::srgb(0.32, 0.78, 0.42));
+            tc.0 = Color::WHITE;
+        } else if replacing {
+            bg.0 = Color::srgba(0.48, 0.36, 0.08, 0.90);
+            *border = BorderColor::all(Color::srgb(0.96, 0.78, 0.24));
+            tc.0 = Color::srgb(1.0, 0.95, 0.75);
+        } else {
+            bg.0 = Color::srgba(0.38, 0.10, 0.10, 0.90);
+            *border = BorderColor::all(Color::srgb(0.88, 0.26, 0.24));
+            tc.0 = Color::srgb(0.98, 0.64, 0.62);
+        }
+    }
+
+    for (chip, mut bg, mut border, mut tc) in &mut q.p2() {
+        match dmg.module_worst_health(chip.0) {
+            ModuleHealth::Intact => {
+                bg.0 = Color::srgba(0.20, 0.23, 0.21, 0.88);
+                *border = BorderColor::all(Color::srgba(0.50, 0.54, 0.50, 0.75));
+                tc.0 = Color::srgb(0.84, 0.87, 0.84);
+            }
+            ModuleHealth::Damaged => {
+                bg.0 = Color::srgba(0.54, 0.38, 0.08, 0.92);
+                *border = BorderColor::all(Color::srgb(0.98, 0.78, 0.22));
+                tc.0 = Color::srgb(1.0, 0.96, 0.80);
+            }
+            ModuleHealth::Destroyed => {
+                bg.0 = Color::srgba(0.46, 0.10, 0.10, 0.94);
+                *border = BorderColor::all(Color::srgb(0.95, 0.24, 0.22));
+                tc.0 = Color::srgb(1.0, 0.72, 0.70);
+            }
+        }
+    }
+}
+
+#[allow(clippy::type_complexity)]
+fn update_hit_cam_panel(
+    time: Res<Time>,
+    sim: Res<SimResource>,
+    pending: Res<PendingSimEvents>,
+    mut state: ResMut<HitCamState>,
+    mut panel_q: Query<(&mut Node, &mut BorderColor), With<HitCamPanel>>,
+    mut texts: ParamSet<(
+        Query<(&mut Text, &mut TextColor), With<HitCamTitleText>>,
+        Query<&mut Text, With<HitCamBodyText>>,
+    )>,
+) {
+    if pending.battle_restarted {
+        state.timer = 0.0;
+    }
+
+    let player_id = sim.0.player_unit().id;
+    for rep in &pending.hit_reports {
+        if rep.shooter_id != player_id || rep.inert_hit {
+            continue;
+        }
+        let (title, color) = if let Some(reason) = rep.kill_reason {
+            (
+                format!("DESTROYED - {}", reason.short_label()),
+                Color::srgb(1.0, 0.36, 0.28),
+            )
+        } else {
+            match rep.outcome {
+                HitOutcome::Penetration => ("PENETRATION".to_string(), Color::srgb(0.32, 0.95, 0.42)),
+                HitOutcome::ExternalModuleHit => {
+                    ("MODULE HIT".to_string(), Color::srgb(0.96, 0.82, 0.30))
+                }
+                HitOutcome::Ricochet => ("RICOCHET".to_string(), Color::srgb(0.98, 0.68, 0.26)),
+                HitOutcome::NonPenetration => {
+                    ("NON-PENETRATION".to_string(), Color::srgb(0.76, 0.78, 0.76))
+                }
+            }
+        };
+
+        let mut lines = Vec::new();
+        lines.push(format!(
+            "{} | {} ({:.0}mm {})",
+            rep.target_name,
+            rep.plate_name,
+            rep.nominal_armor_mm,
+            rep.armor_type.label()
+        ));
+        lines.push(format!(
+            "Angle {:.0} deg | Eff {:.0}mm vs {:.0}mm AP",
+            rep.impact_angle_deg, rep.effective_armor_mm, rep.penetration_mm
+        ));
+        if !rep.killed_crew.is_empty() {
+            let names: Vec<&str> = rep.killed_crew.iter().map(|c| c.label()).collect();
+            lines.push(format!("CREW KO: {}", names.join(", ")));
+        }
+        if !rep.damaged_modules.is_empty() {
+            let mods: Vec<String> = rep
+                .damaged_modules
+                .iter()
+                .take(4)
+                .map(|(k, h)| {
+                    let tag = if *h == ModuleHealth::Destroyed {
+                        "X"
+                    } else {
+                        "!"
+                    };
+                    format!("{}[{}]", k.short_label(), tag)
+                })
+                .collect();
+            lines.push(format!("MODULES: {}", mods.join(" ")));
+        }
+        if rep.started_fire {
+            lines.push("FIRE IGNITED!".to_string());
+        }
+
+        state.title = title;
+        state.title_color = color;
+        state.border_color = color;
+        state.body = lines.join("\n");
+        state.timer = HIT_CAM_TTL_SECS;
+    }
+
+    state.timer = (state.timer - time.delta_secs()).max(0.0);
+
+    if let Ok((mut node, mut border)) = panel_q.single_mut() {
+        if state.timer > 0.0 {
+            node.display = Display::Flex;
+            *border = BorderColor::all(state.border_color);
+        } else {
+            node.display = Display::None;
+        }
+    }
+    if state.timer > 0.0 {
+        if let Ok((mut t, mut c)) = texts.p0().single_mut() {
+            t.0 = state.title.clone();
+            c.0 = state.title_color;
+        }
+        if let Ok(mut b) = texts.p1().single_mut() {
+            b.0 = state.body.clone();
+        }
     }
 }
 
@@ -833,6 +1193,7 @@ fn update_hud_reticles(
 ) {
     let player_unit = sim.0.player_unit();
     let tank = &player_unit.state;
+    let can_fire = player_unit.damage.can_fire();
 
     if let Ok(mut overlay) = reticle_nodes.p1().single_mut() {
         overlay.display = if player_unit.alive && cam_ctrl.mode == CameraMode::Sniper {
@@ -859,7 +1220,9 @@ fn update_hud_reticles(
             reticle_node.display = Display::Flex;
             reticle_node.left = Val::Px(viewport_pos.x - 9.0);
             reticle_node.top = Val::Px(viewport_pos.y - 9.0);
-            *reticle_border = BorderColor::all(if tank.is_loaded() {
+            *reticle_border = BorderColor::all(if !can_fire {
+                Color::srgba(0.95, 0.25, 0.22, 0.9)
+            } else if tank.is_loaded() {
                 Color::srgba(0.25, 0.95, 0.35, 0.9)
             } else {
                 Color::srgba(0.95, 0.62, 0.18, 0.9)
@@ -921,7 +1284,7 @@ fn update_battle_scoreboard(
             color.0 = Color::srgb(0.98, 0.45, 0.38);
         } else {
             text.0 = format!(
-                "{:02}:{:02} | KILLS {} | HITS {}",
+                "{:02}:{:02} | KILLS {} | PENS {}",
                 secs / 60,
                 secs % 60,
                 player.kills,
@@ -934,7 +1297,7 @@ fn update_battle_scoreboard(
 
 fn update_kill_feed(
     time: Res<Time>,
-    mut pending: ResMut<PendingSimEvents>,
+    pending: Res<PendingSimEvents>,
     mut feed: ResMut<KillFeedBuffer>,
     mut rows: Query<(&KillFeedRow, &mut Node, &mut Text, &mut TextColor)>,
 ) {
@@ -948,7 +1311,7 @@ fn update_kill_feed(
     }
     feed.entries.retain(|e| e.age < KILL_FEED_TTL_SECS);
 
-    for k in pending.kills.drain(..) {
+    for k in &pending.kills {
         let color = if k.killer_team == Team::Allies {
             Color::srgb(0.55, 0.82, 1.0)
         } else {
@@ -956,11 +1319,12 @@ fn update_kill_feed(
         };
         feed.entries.push(KillFeedEntry {
             line: format!(
-                "[{}] {} > [{}] {}",
+                "[{}] {} > [{}] {} ({})",
                 k.killer_team.label(),
                 k.killer_name,
                 k.victim_team.label(),
-                k.victim_name
+                k.victim_name,
+                k.reason.short_label(),
             ),
             color,
             age: 0.0,
@@ -1025,23 +1389,18 @@ fn update_overhead_markers(
         };
 
         node.display = Display::Flex;
-        node.left = Val::Px(screen.x - 42.0);
+        node.left = Val::Px(screen.x - 38.0);
         node.top = Val::Px(screen.y - 16.0);
 
+        let fire_tag = if unit.damage.on_fire { " [FIRE]" } else { "" };
         if unit.team == Team::Allies {
             *border = BorderColor::all(Color::srgba(0.35, 0.72, 1.0, 0.85));
             color.0 = Color::srgb(0.62, 0.86, 1.0);
-            text.0 = format!("{} {:.0}m", unit.name, dist);
+            text.0 = format!("{} {:.0}m{}", unit.name, dist, fire_tag);
         } else {
             *border = BorderColor::all(Color::srgba(0.95, 0.32, 0.28, 0.90));
             color.0 = Color::srgb(1.0, 0.54, 0.48);
-            let pips = match unit.hits_remaining {
-                3 => "[###]",
-                2 => "[##.]",
-                1 => "[#..]",
-                _ => "[...]",
-            };
-            text.0 = format!("{} {:.0}m {}", unit.name, dist, pips);
+            text.0 = format!("{} {:.0}m{}", unit.name, dist, fire_tag);
         }
     }
 }
@@ -1161,7 +1520,7 @@ fn update_battle_end_modal(
         let player = sim.0.player_unit();
         let secs = battle.battle_time as u32;
         stats.0 = format!(
-            "ALLIES {:.0}  -  {:.0} AXIS\nBATTLE TIME {:02}:{:02}\nYOUR KILLS: {}  |  DIRECT HITS: {}",
+            "ALLIES {:.0}  -  {:.0} AXIS\nBATTLE TIME {:02}:{:02}\nYOUR KILLS: {}  |  PENETRATIONS: {}",
             battle.allies_tickets.ceil(),
             battle.axis_tickets.ceil(),
             secs / 60,

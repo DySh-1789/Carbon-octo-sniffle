@@ -3,6 +3,10 @@ use std::f32::consts::{PI, TAU};
 use voxel::glam::{IVec3, Quat, Vec3};
 use voxel::{TankVoxelModels, VoxelWorld, raycast_world};
 
+use crate::battle::SimRng;
+use crate::damage::DamageModifiers;
+use crate::shell::ShellSpec;
+
 /// Static performance and geometry parameters for a tank.
 #[derive(Clone, Debug)]
 pub struct TankConfig {
@@ -33,6 +37,8 @@ pub struct TankConfig {
     pub muzzle_velocity: f32,
     /// Projectile aerodynamic drag factor (`1/s` velocity damping).
     pub shell_drag: f32,
+    /// Primary cannon shell specification (Stage 4: solid kinetic AP).
+    pub shell: ShellSpec,
     /// Horizontal bounding half-extent used to keep hull inside playable arena.
     pub hull_radius: f32,
     /// Half-width of tank hull/tracks in meters for obstacle collision & suspension.
@@ -47,6 +53,7 @@ pub struct TankConfig {
 impl TankConfig {
     /// Balanced WWII medium tank profile matching the base voxel tank.
     pub fn stage1_basic(models: &TankVoxelModels) -> Self {
+        let shell = ShellSpec::basic_75mm_ap();
         Self {
             name: "Base Medium Tank".to_string(),
             max_forward_speed: 13.9,
@@ -60,8 +67,9 @@ impl TankConfig {
             gun_min_pitch: (-8.0f32).to_radians(),
             gun_max_pitch: (20.0f32).to_radians(),
             reload_time: 4.5,
-            muzzle_velocity: 780.0,
-            shell_drag: 0.04,
+            muzzle_velocity: shell.muzzle_velocity,
+            shell_drag: shell.drag_coeff,
+            shell,
             hull_radius: 3.2,
             hull_half_width: 1.55,
             hull_half_length: 2.65,
@@ -97,12 +105,13 @@ impl Default for TankInput {
 }
 
 /// Spawn parameters emitted when a tank successfully fires its main cannon.
-#[derive(Copy, Clone, Debug)]
+#[derive(Clone, Debug)]
 pub struct FiredShot {
     pub muzzle_position: Vec3,
     pub direction: Vec3,
     pub velocity: Vec3,
     pub drag_coeff: f32,
+    pub shell: ShellSpec,
 }
 
 /// Dynamic runtime state of a single tank in the simulation.
@@ -261,10 +270,34 @@ impl TankState {
     }
 
     /// Advances tank movement, 6-point terrain suspension, obstacle collisions, turret slewing,
-    /// reload, and recoil by `dt` seconds.
+    /// reload, and recoil by `dt` seconds (intact vehicle; used by solo tests).
     pub fn step(&mut self, dt: f32, input: TankInput, world: &VoxelWorld) -> Option<FiredShot> {
-        let throttle = input.throttle.clamp(-1.0, 1.0);
-        let steer = input.steer.clamp(-1.0, 1.0);
+        let mut rng = SimRng::new(1);
+        self.step_with_modifiers(dt, input, world, DamageModifiers::intact(), &mut rng)
+    }
+
+    /// Advances tank simulation with active War Thunder module & crew damage penalties.
+    pub fn step_with_modifiers(
+        &mut self,
+        dt: f32,
+        input: TankInput,
+        world: &VoxelWorld,
+        mods: DamageModifiers,
+        rng: &mut SimRng,
+    ) -> Option<FiredShot> {
+        let throttle = if mods.can_drive {
+            input.throttle.clamp(-1.0, 1.0)
+        } else {
+            0.0
+        };
+        let mut steer = if mods.can_drive {
+            input.steer.clamp(-1.0, 1.0) * mods.steer_scale
+        } else {
+            0.0
+        };
+        if mods.can_drive && mods.broken_track_pull.abs() > 0.01 && throttle.abs() > 0.05 {
+            steer = (steer + mods.broken_track_pull * throttle.signum()).clamp(-1.0, 1.0);
+        }
         let in_water = self.is_on_water(world);
 
         // 1. Longitudinal tracked acceleration / braking / slope grade physics / water ford drag
@@ -275,13 +308,14 @@ impl TankState {
             let accel = if opposing {
                 self.config.brake_decel
             } else {
-                self.config.acceleration
+                self.config.acceleration * mods.speed_scale
             };
             self.forward_speed += throttle * accel * dt;
             // Uphill pitch reduces climbing acceleration; downhill adds slight gravity momentum
             self.forward_speed -= slope_sin * 5.6 * dt;
         } else {
-            let decel = self.config.coast_drag * dt;
+            let drag_mult = if mods.can_drive { 1.0 } else { 2.6 };
+            let decel = self.config.coast_drag * drag_mult * dt;
             if self.forward_speed.abs() <= decel {
                 // Tracked hill-hold brake keeps stationary tank steady on hull-down slopes
                 self.forward_speed = 0.0;
@@ -291,12 +325,13 @@ impl TankState {
             }
         }
 
-        // Dynamic slope & water speed envelope (uphill slows max speed; water ford slows tracks)
+        // Dynamic slope, water & damage speed envelope
         let uphill_factor = (1.0 - 0.90 * slope_sin.max(0.0)).clamp(0.45, 1.0);
         let downhill_boost = 1.0 + 0.14 * (-slope_sin).max(0.0);
         let water_factor = if in_water { 0.72 } else { 1.0 };
-        let eff_max_fwd = self.config.max_forward_speed * uphill_factor * downhill_boost * water_factor;
-        let eff_max_rev = self.config.max_reverse_speed * water_factor;
+        let eff_max_fwd =
+            self.config.max_forward_speed * uphill_factor * downhill_boost * water_factor * mods.speed_scale;
+        let eff_max_rev = self.config.max_reverse_speed * water_factor * mods.speed_scale;
         self.forward_speed = self.forward_speed.clamp(-eff_max_rev, eff_max_fwd);
 
         // 2. Hull steering (neutral pivot turn + reverse steering inversion + wall-wedge protection)
@@ -370,26 +405,36 @@ impl TankState {
         self.hull_pitch += (target_pitch - self.hull_pitch) * att_alpha;
         self.hull_roll += (target_roll - self.hull_roll) * att_alpha;
 
-        // 5. Independent turret yaw & gun pitch tracking toward `aim_world_point`
-        self.update_turret_and_gun(dt, input.aim_world_point);
+        // 5. Independent turret yaw & gun pitch tracking (respects dead Gunner / jammed TurretRing)
+        if mods.can_aim {
+            self.update_turret_and_gun(dt, input.aim_world_point, mods.turret_rate_scale);
+        }
 
-        // 6. Reload & visual barrel recoil decay
-        self.reload_remaining = (self.reload_remaining - dt).max(0.0);
+        // 6. Reload (slowed when Loader dead or Breech damaged) & visual recoil decay
+        let reload_rate = (1.0 / mods.reload_time_scale.max(0.1)).clamp(0.1, 2.0);
+        self.reload_remaining = (self.reload_remaining - dt * reload_rate).max(0.0);
         self.recoil_offset = (self.recoil_offset - 1.1 * dt).max(0.0);
 
-        // 7. Main gun firing
-        if input.fire && self.is_loaded() {
+        // 7. Main gun firing (blocked if Gunner absent or Breech/Barrel destroyed)
+        if input.fire && self.is_loaded() && mods.can_fire {
             self.reload_remaining = self.config.reload_time;
             self.recoil_offset = 0.32;
             self.shots_fired += 1;
 
-            let dir = self.gun_forward();
+            let mut dir = self.gun_forward();
+            if mods.fire_dispersion_rad > 1e-4 {
+                let yaw_off = rng.signed() * mods.fire_dispersion_rad;
+                let pitch_off = rng.signed() * mods.fire_dispersion_rad;
+                let rot = Quat::from_rotation_y(yaw_off) * Quat::from_rotation_x(pitch_off);
+                dir = (rot * dir).normalize();
+            }
             let hull_vel = horiz_fwd * self.forward_speed;
             return Some(FiredShot {
                 muzzle_position: self.muzzle_world_position(),
                 direction: dir,
                 velocity: dir * self.config.muzzle_velocity + hull_vel,
                 drag_coeff: self.config.shell_drag,
+                shell: self.config.shell.clone(),
             });
         }
 
@@ -513,7 +558,7 @@ impl TankState {
         hits
     }
 
-    fn update_turret_and_gun(&mut self, dt: f32, aim_world_point: Vec3) {
+    fn update_turret_and_gun(&mut self, dt: f32, aim_world_point: Vec3, turret_rate_scale: f32) {
         let gun_pos = self.gun_world_position();
         let to_target_world = aim_world_point - gun_pos;
         if to_target_world.length_squared() < 0.25 {
@@ -524,7 +569,7 @@ impl TankState {
         let to_target_hull = self.hull_rotation().inverse() * to_target_world;
         let desired_yaw = (-to_target_hull.x).atan2(-to_target_hull.z);
         let yaw_err = wrap_angle(desired_yaw - self.turret_yaw_local);
-        let max_yaw_step = self.config.turret_yaw_rate * dt;
+        let max_yaw_step = self.config.turret_yaw_rate * turret_rate_scale * dt;
         self.turret_yaw_local =
             wrap_angle(self.turret_yaw_local + yaw_err.clamp(-max_yaw_step, max_yaw_step));
 

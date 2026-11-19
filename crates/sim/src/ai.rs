@@ -486,7 +486,7 @@ pub struct BotBrain {
     unstick_timer: f32,
     unstick_steer: f32,
     cover_timer: f32,
-    last_hits: u8,
+    last_damage_events: u32,
     think_phase: u64,
 }
 
@@ -513,7 +513,7 @@ impl BotBrain {
             unstick_timer: 0.0,
             unstick_steer: 1.0,
             cover_timer: 0.0,
-            last_hits: unit.hits_remaining,
+            last_damage_events: unit.damage.damage_events_received,
             think_phase: (unit.id.0 as u64 * 7) % THINK_INTERVAL,
         }
     }
@@ -530,11 +530,11 @@ impl BotBrain {
         let pos = st.position;
         let think = (ctx.tick + self.think_phase).is_multiple_of(THINK_INTERVAL);
 
-        // React to incoming hits: back off into cover while reloading
-        if me.hits_remaining < self.last_hits {
-            self.last_hits = me.hits_remaining;
+        // React to incoming hits: back off into cover while reloading (if still mobile)
+        if me.damage.damage_events_received > self.last_damage_events {
+            self.last_damage_events = me.damage.damage_events_received;
             self.aim_settle = self.aim_settle.max(0.5);
-            if st.reload_remaining > 1.5 {
+            if me.damage.can_move() && (st.reload_remaining > 1.5 || !me.damage.can_fire()) {
                 self.cover_timer = 1.6;
             }
         }
@@ -620,8 +620,10 @@ impl BotBrain {
             steer = 0.0;
         } else {
             let dist_goal = horiz_dist(pos, goal);
-            let engage_hold =
-                target_visible && target_dist < ENGAGE_HOLD_RANGE && st.reload_remaining < 1.2;
+            let engage_hold = target_visible
+                && me.damage.can_fire()
+                && target_dist < ENGAGE_HOLD_RANGE
+                && st.reload_remaining < 1.2;
             if dist_goal < 3.5 || engage_hold {
                 self.mode = if engage_hold {
                     BotMode::Engage
@@ -647,8 +649,8 @@ impl BotBrain {
                 steer = s;
             }
 
-            // Anti-stuck: stalled against an obstacle while trying to drive
-            if throttle > 0.4 && st.forward_speed.abs() < 0.6 {
+            // Anti-stuck: stalled against an obstacle while trying to drive (ignore if immobilized by damage)
+            if me.damage.can_move() && throttle > 0.4 && st.forward_speed.abs() < 0.6 {
                 self.stuck_timer += dt;
                 if self.stuck_timer > 1.4 {
                     self.stuck_timer = 0.0;
@@ -665,7 +667,7 @@ impl BotBrain {
             throttle,
             steer,
             aim_world_point: aim_point,
-            fire,
+            fire: fire && me.damage.can_fire(),
         }
     }
 
@@ -714,8 +716,9 @@ impl BotBrain {
             if Some(t.id) == self.target {
                 score -= 25.0;
             }
-            // Prefer finishing off damaged enemies
-            score -= (3u8.saturating_sub(t.hits_remaining)) as f32 * 10.0;
+            // Prefer finishing off critically damaged enemies with fewer surviving crew
+            let crew_lost = t.damage.total_crew_count().saturating_sub(t.damage.alive_crew_count());
+            score -= crew_lost as f32 * 10.0;
             if best.is_none_or(|b| score < b.0) {
                 best = Some((score, t.id));
             }

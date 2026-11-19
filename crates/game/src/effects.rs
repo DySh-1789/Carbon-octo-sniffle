@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use bevy::prelude::*;
+use sim::{HitOutcome, KillReason};
 
 use crate::bridge::{PendingSimEvents, SimResource, to_bevy_vec3};
 use crate::camera::MainTankCamera;
@@ -14,6 +15,8 @@ struct EffectsAssets {
     tracer_mat: Handle<StandardMaterial>,
     puff_mesh: Handle<Mesh>,
     flash_mat: Handle<StandardMaterial>,
+    fire_mat: Handle<StandardMaterial>,
+    spark_mat: Handle<StandardMaterial>,
     smoke_mat: Handle<StandardMaterial>,
     wreck_smoke_mat: Handle<StandardMaterial>,
     dirt_mat: Handle<StandardMaterial>,
@@ -22,6 +25,11 @@ struct EffectsAssets {
 #[derive(Resource, Default)]
 struct TracerEntities {
     map: HashMap<u64, Entity>,
+}
+
+#[derive(Resource, Default)]
+struct FireEmitTimer {
+    accum: f32,
 }
 
 #[derive(Component)]
@@ -46,6 +54,7 @@ pub struct EffectsPlugin;
 impl Plugin for EffectsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<TracerEntities>()
+            .init_resource::<FireEmitTimer>()
             .add_systems(Startup, setup_effects_assets)
             .add_systems(
                 Update,
@@ -53,6 +62,7 @@ impl Plugin for EffectsPlugin {
                     clear_effects_on_restart,
                     sync_projectile_tracers,
                     spawn_shot_and_impact_effects,
+                    emit_active_tank_fire_effects,
                     tick_transient_effects,
                 )
                     .chain(),
@@ -79,13 +89,25 @@ fn setup_effects_assets(
         unlit: true,
         ..default()
     });
+    let fire_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(1.0, 0.42, 0.08),
+        emissive: LinearRgba::new(9.5, 2.8, 0.25, 1.0),
+        unlit: true,
+        ..default()
+    });
+    let spark_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(1.0, 0.94, 0.65),
+        emissive: LinearRgba::new(16.0, 11.0, 3.0, 1.0),
+        unlit: true,
+        ..default()
+    });
     let smoke_mat = materials.add(StandardMaterial {
         base_color: Color::srgb(0.62, 0.60, 0.56),
         perceptual_roughness: 1.0,
         ..default()
     });
     let wreck_smoke_mat = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.22, 0.21, 0.20),
+        base_color: Color::srgb(0.18, 0.17, 0.17),
         perceptual_roughness: 1.0,
         ..default()
     });
@@ -100,6 +122,8 @@ fn setup_effects_assets(
         tracer_mat,
         puff_mesh,
         flash_mat,
+        fire_mat,
+        spark_mat,
         smoke_mat,
         wreck_smoke_mat,
         dirt_mat,
@@ -174,15 +198,16 @@ fn sync_projectile_tracers(
 
 fn spawn_shot_and_impact_effects(
     mut commands: Commands,
-    mut pending: ResMut<PendingSimEvents>,
+    pending: Res<PendingSimEvents>,
     assets: Res<EffectsAssets>,
     cam_q: Query<&Transform, With<MainTankCamera>>,
 ) {
     let cam_pos = cam_q.single().ok().map(|tf| tf.translation);
-    let near_cam = |pos: Vec3| cam_pos.is_some_and(|c| c.distance_squared(pos) < MAX_DYNAMIC_LIGHT_DIST_SQ);
+    let near_cam =
+        |pos: Vec3| cam_pos.is_some_and(|c| c.distance_squared(pos) < MAX_DYNAMIC_LIGHT_DIST_SQ);
 
     // 1. Muzzle flash + smoke puffs on firing (player & bots)
-    for shot in pending.fired_shots.drain(..) {
+    for shot in &pending.fired_shots {
         let muzzle = to_bevy_vec3(shot.muzzle_position);
         let dir = to_bevy_vec3(shot.direction);
 
@@ -237,7 +262,7 @@ fn spawn_shot_and_impact_effects(
     }
 
     // 2. Impact voxel dust / flash burst when shell strikes terrain or buildings
-    for impact in pending.impacts.drain(..) {
+    for impact in &pending.impacts {
         let pos = to_bevy_vec3(impact.position);
         let normal = to_bevy_vec3(impact.normal).normalize_or_zero();
         let up = if normal.length_squared() > 0.1 {
@@ -303,93 +328,219 @@ fn spawn_shot_and_impact_effects(
         }
     }
 
-    // 3. Direct tank armor hits (sparks) & vehicle knockouts (fireball + billowing smoke plume)
-    for hit in pending.tank_hits.drain(..) {
-        let pos = to_bevy_vec3(hit.position);
-        let normal = to_bevy_vec3(hit.normal).normalize_or_zero();
+    // 3. Stage 4 War Thunder armor hits: ricochet sparks, non-pens, penetrations & ammo detonations
+    for report in &pending.hit_reports {
+        let pos = to_bevy_vec3(report.position);
+        let normal = to_bevy_vec3(report.normal).normalize_or_zero();
         let up = if normal.length_squared() > 0.1 {
             normal
         } else {
             Vec3::Y
         };
+        let is_ammo_det = report.kill_reason == Some(KillReason::AmmoRackDetonation);
+        let destroyed = report.kill_reason.is_some();
 
         if near_cam(pos) {
+            let (intensity, range, life) = if is_ammo_det {
+                (900_000.0, 28.0, 0.55)
+            } else if destroyed {
+                (550_000.0, 20.0, 0.38)
+            } else if report.outcome == HitOutcome::Ricochet {
+                (340_000.0, 14.0, 0.14)
+            } else {
+                (260_000.0, 11.0, 0.12)
+            };
             commands.spawn((
                 PointLight {
-                    color: Color::srgb(1.0, 0.55, 0.15),
-                    intensity: if hit.destroyed { 650_000.0 } else { 320_000.0 },
-                    range: if hit.destroyed { 22.0 } else { 12.0 },
+                    color: if report.outcome == HitOutcome::Ricochet {
+                        Color::srgb(1.0, 0.90, 0.55)
+                    } else {
+                        Color::srgb(1.0, 0.52, 0.14)
+                    },
+                    intensity,
+                    range,
                     ..default()
                 },
-                Transform::from_translation(pos + Vec3::Y * 0.8),
+                Transform::from_translation(pos + up * 0.4),
                 TransientLight {
                     age: 0.0,
-                    lifetime: if hit.destroyed { 0.45 } else { 0.14 },
-                    start_intensity: if hit.destroyed { 650_000.0 } else { 320_000.0 },
+                    lifetime: life,
+                    start_intensity: intensity,
                 },
             ));
         }
 
-        // Hit spark / blast flash
+        // Ricochet sparks streak sharply along the deflected angle
+        if report.outcome == HitOutcome::Ricochet {
+            let rdir = report
+                .ricochet_dir
+                .map(to_bevy_vec3)
+                .unwrap_or(up)
+                .normalize_or_zero();
+            for i in 0..8 {
+                let angle = i as f32 * std::f32::consts::TAU / 8.0;
+                let vel = rdir * (10.0 + (i % 3) as f32 * 4.0)
+                    + Vec3::new(angle.cos() * 2.2, 1.8, angle.sin() * 2.2);
+                commands.spawn((
+                    Mesh3d(assets.puff_mesh.clone()),
+                    MeshMaterial3d(assets.spark_mat.clone()),
+                    Transform::from_translation(pos).with_scale(Vec3::splat(0.16)),
+                    TransientParticle {
+                        velocity: vel,
+                        gravity: 11.0,
+                        age: 0.0,
+                        lifetime: 0.36 + (i % 3) as f32 * 0.08,
+                        start_scale: 0.18,
+                        end_scale: 0.02,
+                    },
+                ));
+            }
+            continue;
+        }
+
+        // Armor flash & sparks
+        let flash_scale = if is_ammo_det {
+            2.4
+        } else if destroyed {
+            1.4
+        } else if report.outcome == HitOutcome::Penetration {
+            0.9
+        } else {
+            0.55
+        };
         commands.spawn((
             Mesh3d(assets.puff_mesh.clone()),
-            MeshMaterial3d(assets.flash_mat.clone()),
-            Transform::from_translation(pos + up * 0.25)
-                .with_scale(Vec3::splat(if hit.destroyed { 1.65 } else { 0.8 })),
+            MeshMaterial3d(if is_ammo_det {
+                assets.fire_mat.clone()
+            } else {
+                assets.flash_mat.clone()
+            }),
+            Transform::from_translation(pos + up * 0.25).with_scale(Vec3::splat(flash_scale)),
             TransientParticle {
-                velocity: Vec3::Y * if hit.destroyed { 2.5 } else { 0.6 },
+                velocity: Vec3::Y * if is_ammo_det { 4.2 } else { 1.0 },
                 gravity: 0.0,
                 age: 0.0,
-                lifetime: if hit.destroyed { 0.36 } else { 0.14 },
-                start_scale: if hit.destroyed { 1.75 } else { 0.85 },
+                lifetime: if is_ammo_det { 0.48 } else { 0.16 },
+                start_scale: flash_scale,
                 end_scale: 0.1,
             },
         ));
 
-        // Metallic armor sparks flying along hit normal
-        for i in 0..6 {
-            let angle = i as f32 * std::f32::consts::TAU / 6.0;
-            let vel = up * (6.0 + (i % 3) as f32 * 2.5)
-                + Vec3::new(angle.cos() * 3.5, 2.0, angle.sin() * 3.5);
+        let spark_count = if is_ammo_det { 10 } else { 5 };
+        for i in 0..spark_count {
+            let angle = i as f32 * std::f32::consts::TAU / spark_count as f32;
+            let vel = up * (5.5 + (i % 3) as f32 * 2.8)
+                + Vec3::new(angle.cos() * 3.8, 2.5, angle.sin() * 3.8);
             commands.spawn((
                 Mesh3d(assets.puff_mesh.clone()),
-                MeshMaterial3d(assets.flash_mat.clone()),
-                Transform::from_translation(pos).with_scale(Vec3::splat(0.18)),
+                MeshMaterial3d(assets.spark_mat.clone()),
+                Transform::from_translation(pos).with_scale(Vec3::splat(0.16)),
                 TransientParticle {
                     velocity: vel,
-                    gravity: 12.0,
+                    gravity: 12.5,
                     age: 0.0,
-                    lifetime: 0.35 + (i % 2) as f32 * 0.12,
-                    start_scale: 0.20,
+                    lifetime: 0.34 + (i % 2) as f32 * 0.12,
+                    start_scale: 0.18,
                     end_scale: 0.02,
                 },
             ));
         }
 
-        // Tall dark-smoke plume on knockout
-        if hit.destroyed {
-            for i in 0..12 {
-                let angle = i as f32 * std::f32::consts::TAU / 12.0;
-                let spread = 1.1 + (i % 3) as f32 * 0.6;
+        // Massive fireball + dark smoke tower on ammo-rack detonation or knockout
+        if destroyed {
+            let plume_n = if is_ammo_det { 14 } else { 9 };
+            for i in 0..plume_n {
+                let angle = i as f32 * std::f32::consts::TAU / plume_n as f32;
+                let spread = 1.2 + (i % 3) as f32 * 0.7;
+                let is_flame = is_ammo_det && i % 3 == 0;
                 commands.spawn((
                     Mesh3d(assets.puff_mesh.clone()),
-                    MeshMaterial3d(assets.wreck_smoke_mat.clone()),
-                    Transform::from_translation(pos + Vec3::Y * 0.5).with_scale(Vec3::splat(0.6)),
+                    MeshMaterial3d(if is_flame {
+                        assets.fire_mat.clone()
+                    } else {
+                        assets.wreck_smoke_mat.clone()
+                    }),
+                    Transform::from_translation(pos + Vec3::Y * 0.6).with_scale(Vec3::splat(0.65)),
                     TransientParticle {
                         velocity: Vec3::new(
                             angle.cos() * spread,
-                            3.6 + (i % 4) as f32 * 1.4,
+                            if is_flame { 5.2 } else { 3.8 } + (i % 4) as f32 * 1.4,
                             angle.sin() * spread,
                         ),
-                        gravity: -0.6,
+                        gravity: -0.7,
                         age: 0.0,
-                        lifetime: 1.6 + (i % 5) as f32 * 0.35,
-                        start_scale: 0.55,
-                        end_scale: 2.8,
+                        lifetime: if is_flame {
+                            0.75
+                        } else {
+                            1.8 + (i % 5) as f32 * 0.35
+                        },
+                        start_scale: 0.60,
+                        end_scale: if is_flame { 2.2 } else { 3.0 },
                     },
                 ));
             }
         }
+    }
+}
+
+/// Continuously emits voxel flames and black smoke from burning tanks (active engine/fuel fire).
+fn emit_active_tank_fire_effects(
+    mut commands: Commands,
+    time: Res<Time>,
+    sim: Res<SimResource>,
+    assets: Res<EffectsAssets>,
+    mut timer: ResMut<FireEmitTimer>,
+) {
+    timer.accum += time.delta_secs();
+    if timer.accum < 0.14 {
+        return;
+    }
+    timer.accum = 0.0;
+
+    for unit in &sim.0.tanks {
+        let burning = unit.damage.on_fire || (!unit.alive && unit.damage.turret_blown_off);
+        if !burning {
+            continue;
+        }
+        let deck_offset = if unit.damage.turret_blown_off {
+            Vec3::new(0.0, 1.45, -0.25)
+        } else {
+            Vec3::new(0.0, 1.35, 1.35)
+        };
+        let origin = to_bevy_vec3(unit.state.position)
+            + Quat::from_rotation_y(unit.state.hull_yaw) * deck_offset;
+        let phase = (sim.0.tick as f32 * 0.37 + unit.id.0 as f32 * 1.9).sin();
+
+        // Rising orange flame voxel
+        commands.spawn((
+            Mesh3d(assets.puff_mesh.clone()),
+            MeshMaterial3d(assets.fire_mat.clone()),
+            Transform::from_translation(origin + Vec3::new(phase * 0.3, 0.0, -phase * 0.25))
+                .with_scale(Vec3::splat(0.45)),
+            TransientParticle {
+                velocity: Vec3::new(phase * 0.6, 2.8, -phase * 0.5),
+                gravity: -0.5,
+                age: 0.0,
+                lifetime: 0.42,
+                start_scale: 0.52,
+                end_scale: 0.08,
+            },
+        ));
+
+        // Billowing black smoke column
+        commands.spawn((
+            Mesh3d(assets.puff_mesh.clone()),
+            MeshMaterial3d(assets.wreck_smoke_mat.clone()),
+            Transform::from_translation(origin + Vec3::Y * 0.4).with_scale(Vec3::splat(0.55)),
+            TransientParticle {
+                velocity: Vec3::new(phase * 0.9, 3.6, 0.4),
+                gravity: -0.4,
+                age: 0.0,
+                lifetime: 1.55,
+                start_scale: 0.55,
+                end_scale: 2.35,
+            },
+        ));
     }
 }
 

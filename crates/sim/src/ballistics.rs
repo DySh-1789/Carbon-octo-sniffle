@@ -2,6 +2,7 @@ use voxel::VoxelId;
 use voxel::glam::Vec3;
 
 use crate::battle::{TankId, Team};
+use crate::shell::ShellSpec;
 
 /// Standard gravity acceleration in m/s².
 pub const GRAVITY: f32 = 9.81;
@@ -10,11 +11,14 @@ pub const GRAVITY: f32 = 9.81;
 pub const FIXED_DT: f32 = 1.0 / 60.0;
 
 /// Active ballistic projectile in flight.
-#[derive(Copy, Clone, Debug)]
+#[derive(Clone, Debug)]
 pub struct Projectile {
     pub id: u64,
     pub owner: TankId,
     pub owner_team: Team,
+    pub shell: ShellSpec,
+    /// True once this projectile has ricocheted off armor (prevents infinite bounce loops).
+    pub bounced: bool,
     pub position: Vec3,
     pub prev_position: Vec3,
     pub velocity: Vec3,

@@ -90,9 +90,11 @@ mod tests {
                 sim.0.player_tank().position
             );
             assert_eq!(sim.0.player_tank().shots_fired, 1);
+            assert_eq!(sim.0.player_unit().damage.alive_crew_count(), 5);
 
+            // Frame events are cleared cleanly in PostUpdate after Update consumers read them
             let events = app.world().resource::<PendingSimEvents>();
-            assert!(!events.fired_shots.is_empty());
+            assert!(events.fired_shots.is_empty());
             assert!(!events.battle_restarted);
         }
 
@@ -124,7 +126,18 @@ mod tests {
         )))
         .add_plugins(super::TankGamePlugin);
 
-        for _ in 0..8 {
+        for _ in 0..4 {
+            app.update();
+        }
+
+        // Exercise Stage 4 turret blow-off, active fire emitter, and WT damage HUD across all plugins
+        {
+            let mut sim = app.world_mut().resource_mut::<SimResource>();
+            sim.0.tanks[6].alive = false;
+            sim.0.tanks[6].damage.turret_blown_off = true;
+            sim.0.tanks[0].damage.on_fire = true;
+        }
+        for _ in 0..10 {
             app.update();
         }
 
@@ -137,5 +150,7 @@ mod tests {
 
         let sim = app.world().resource::<SimResource>();
         assert_eq!(sim.0.tanks.len(), 12);
+        assert!(!sim.0.tanks[6].damage.turret_blown_off);
+        assert!(!sim.0.tanks[0].damage.on_fire);
     }
 }
