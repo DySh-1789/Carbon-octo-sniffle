@@ -330,4 +330,56 @@ mod tests {
             "stone arch bridge deck must rise well above stream water, got Y={bridge_y}"
         );
     }
+
+    #[test]
+    fn memory_footprint_stays_within_strict_budget() {
+        let (world, meta) = generate_european_valley_map();
+        let chunk_count = world.chunk_count();
+        let voxel_bytes = world.memory_bytes();
+
+        let mut mesh_count = 0usize;
+        let mut total_verts = 0usize;
+        let mut total_indices = 0usize;
+        let mut max_chunk_verts = 0usize;
+        for coord in world.chunk_coords() {
+            let m = voxel::mesh_world_chunk(&world, coord);
+            if !m.is_empty() {
+                mesh_count += 1;
+                total_verts += m.positions.len();
+                total_indices += m.indices.len();
+                max_chunk_verts = max_chunk_verts.max(m.positions.len());
+            }
+        }
+        // Vertex attributes: pos(12) + normal(12) + color(16) = 40 B; U16 indices = 2 B
+        let mesh_bytes = total_verts * 40 + total_indices * 2;
+        let voxel_mb = voxel_bytes as f64 / (1024.0 * 1024.0);
+        let mesh_mb = mesh_bytes as f64 / (1024.0 * 1024.0);
+        eprintln!(
+            "MEMORY PROFILE: chunks={chunk_count}, voxel_ram={voxel_mb:.2} MB, meshes={mesh_count}, verts={total_verts}, tris={}, max_chunk_verts={max_chunk_verts}, gpu_mesh_buf={mesh_mb:.2} MB, minimap={:.2} KB",
+            total_indices / 3,
+            meta.minimap.rgba.len() as f64 / 1024.0,
+        );
+
+        // Strict regression guards so future stages never bloat RAM
+        let stray: Vec<_> = world
+            .chunk_coords()
+            .filter(|c| c.y != 0 || !(-12..=11).contains(&c.x) || !(-12..=11).contains(&c.z))
+            .collect();
+        assert!(
+            chunk_count <= 576,
+            "European Valley should fit inside a single 24x24 vertical chunk layer, got {chunk_count}, stray={stray:?}"
+        );
+        assert!(
+            voxel_mb < 12.0,
+            "sparse voxel world RAM must stay under 12 MB, got {voxel_mb:.2} MB"
+        );
+        assert!(
+            max_chunk_verts <= u16::MAX as usize,
+            "every chunk mesh must fit inside U16 indices, got {max_chunk_verts} verts"
+        );
+        assert!(
+            mesh_mb < 25.0,
+            "total world GPU mesh buffer budget must stay under 25 MB, got {mesh_mb:.2} MB"
+        );
+    }
 }

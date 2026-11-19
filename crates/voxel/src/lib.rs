@@ -176,4 +176,39 @@ mod tests {
             Some(0.0)
         );
     }
+
+    #[test]
+    fn sparse_chunk_compaction_and_nearest_dirty_ordering() {
+        let mut world = VoxelWorld::new(WORLD_VOXEL_SIZE);
+        // Fill bottom 2 slices of chunk (0,0,0) uniformly with ROCK
+        for z in 0..CHUNK_SIZE_I32 {
+            for x in 0..CHUNK_SIZE_I32 {
+                world.fill_column_raw(x, z, 0, 1, VoxelId::ROCK);
+            }
+        }
+        // Plus one single mixed surface voxel at y = 2
+        world.set_voxel_raw(IVec3::new(5, 2, 5), VoxelId::GRASS);
+
+        let before = world.memory_bytes();
+        world.compact_chunks();
+        let after = world.memory_bytes();
+        assert!(
+            after < before,
+            "compacting uniform rock slices should reduce heap memory: before={before}, after={after}"
+        );
+        let chunk = world.chunk(IVec3::ZERO).unwrap();
+        assert_eq!(chunk.uniform_slice(0), Some(VoxelId::ROCK));
+        assert_eq!(chunk.uniform_slice(1), Some(VoxelId::ROCK));
+        assert_eq!(chunk.uniform_slice(2), None);
+        assert_eq!(chunk.uniform_slice(3), Some(VoxelId::AIR));
+
+        // Verify nearest-first dirty chunk prioritization
+        world.set_voxel(IVec3::new(0, 0, 0), VoxelId::DIRT); // chunk (0,0,0)
+        world.set_voxel(IVec3::new(64, 0, 0), VoxelId::DIRT); // chunk (2,0,0)
+        world.set_voxel(IVec3::new(160, 0, 0), VoxelId::DIRT); // chunk (5,0,0)
+        let nearest = world.take_dirty_chunks_nearest(Vec3::new(8.0, 0.0, 8.0), 2);
+        assert_eq!(nearest.len(), 2);
+        assert!(nearest.contains(&IVec3::ZERO));
+        assert!(nearest.contains(&IVec3::new(2, 0, 0)));
+    }
 }

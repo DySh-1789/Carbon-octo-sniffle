@@ -7,6 +7,7 @@ use crate::material::{MaterialRegistry, VoxelId};
 /// Edge length of a cubic world chunk in voxels (`32 × 32 × 32`).
 pub const CHUNK_SIZE: usize = 32;
 pub const CHUNK_SIZE_I32: i32 = CHUNK_SIZE as i32;
+pub const CHUNK_SLICE_AREA: usize = CHUNK_SIZE * CHUNK_SIZE;
 pub const CHUNK_VOLUME: usize = CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE;
 
 /// World voxel resolution in meters (`0.5 m` → `16 m` per chunk).
@@ -15,10 +16,20 @@ pub const WORLD_VOXEL_SIZE: f32 = 0.5;
 /// Detailed tank voxel resolution in meters (`0.2 m`, Teardown-inspired scale).
 pub const TANK_VOXEL_SIZE: f32 = 0.2;
 
-/// Single `32 × 32 × 32` chunk of world voxels.
+/// Memory-efficient storage for a single horizontal `32 × 32` Y-layer inside a chunk.
+///
+/// Air layers above terrain and uniform underground rock/dirt strata consume zero heap memory,
+/// while mixed surface/building layers allocate only `1 KiB` (`1024 × 1 B`) on demand.
+#[derive(Clone)]
+enum SliceData {
+    Uniform(VoxelId),
+    Dense(Box<[VoxelId; CHUNK_SLICE_AREA]>),
+}
+
+/// Single `32 × 32 × 32` chunk of world voxels using per-Y-slice uniform/dense compression.
 #[derive(Clone)]
 pub struct VoxelChunk {
-    voxels: Box<[VoxelId; CHUNK_VOLUME]>,
+    slices: [SliceData; CHUNK_SIZE],
     non_air_count: u32,
 }
 
@@ -31,35 +42,89 @@ impl Default for VoxelChunk {
 impl VoxelChunk {
     pub fn new() -> Self {
         Self {
-            voxels: Box::new([VoxelId::AIR; CHUNK_VOLUME]),
+            slices: std::array::from_fn(|_| SliceData::Uniform(VoxelId::AIR)),
             non_air_count: 0,
         }
     }
 
     #[inline]
-    pub const fn index(x: usize, y: usize, z: usize) -> usize {
-        x + z * CHUNK_SIZE + y * CHUNK_SIZE * CHUNK_SIZE
+    pub const fn slice_index(x: usize, z: usize) -> usize {
+        x + z * CHUNK_SIZE
     }
 
     #[inline]
     pub fn get(&self, x: usize, y: usize, z: usize) -> VoxelId {
-        self.voxels[Self::index(x, y, z)]
+        match &self.slices[y] {
+            SliceData::Uniform(id) => *id,
+            SliceData::Dense(layer) => layer[Self::slice_index(x, z)],
+        }
+    }
+
+    /// Returns `Some(id)` if the entire `32 × 32` horizontal slice at local `y` is uniform.
+    #[inline]
+    pub fn uniform_slice(&self, y: usize) -> Option<VoxelId> {
+        match &self.slices[y] {
+            SliceData::Uniform(id) => Some(*id),
+            SliceData::Dense(_) => None,
+        }
     }
 
     #[inline]
     pub fn set(&mut self, x: usize, y: usize, z: usize, id: VoxelId) -> bool {
-        let idx = Self::index(x, y, z);
-        let prev = self.voxels[idx];
-        if prev == id {
-            return false;
-        }
+        let idx = Self::slice_index(x, z);
+        let prev = match &mut self.slices[y] {
+            SliceData::Uniform(u) => {
+                if *u == id {
+                    return false;
+                }
+                let prev = *u;
+                let mut layer = Box::new([prev; CHUNK_SLICE_AREA]);
+                layer[idx] = id;
+                self.slices[y] = SliceData::Dense(layer);
+                prev
+            }
+            SliceData::Dense(layer) => {
+                let prev = layer[idx];
+                if prev == id {
+                    return false;
+                }
+                layer[idx] = id;
+                prev
+            }
+        };
+
         if prev.is_air() && !id.is_air() {
             self.non_air_count += 1;
         } else if !prev.is_air() && id.is_air() {
             self.non_air_count -= 1;
         }
-        self.voxels[idx] = id;
         true
+    }
+
+    /// Collapses any dense Y-slice whose 1024 voxels all share the same material back to
+    /// `SliceData::Uniform`, freeing its 1 KiB heap allocation.
+    pub fn compact_uniform_slices(&mut self) {
+        for slice in &mut self.slices {
+            if let SliceData::Dense(layer) = slice {
+                let first = layer[0];
+                if layer.iter().all(|&v| v == first) {
+                    *slice = SliceData::Uniform(first);
+                }
+            }
+        }
+    }
+
+    /// Exact memory footprint of this chunk (struct + allocated dense Y-slices) in bytes.
+    pub fn memory_bytes(&self) -> usize {
+        let dense_bytes: usize = self
+            .slices
+            .iter()
+            .map(|s| match s {
+                SliceData::Uniform(_) => 0,
+                SliceData::Dense(_) => CHUNK_SLICE_AREA * std::mem::size_of::<VoxelId>(),
+            })
+            .sum();
+        std::mem::size_of::<Self>() + dense_bytes
     }
 
     #[inline]
@@ -133,6 +198,12 @@ impl VoxelWorld {
         (chunk_coord * CHUNK_SIZE_I32).as_vec3() * self.voxel_size
     }
 
+    #[inline]
+    pub fn chunk_world_center(&self, chunk_coord: IVec3) -> Vec3 {
+        let half = (CHUNK_SIZE as f32 * 0.5) * self.voxel_size;
+        self.chunk_world_origin(chunk_coord) + Vec3::splat(half)
+    }
+
     /// World-space horizontal bounds `(min_x, max_x, min_z, max_z)`.
     pub fn playable_bounds_xz(&self) -> (f32, f32, f32, f32) {
         (
@@ -175,11 +246,12 @@ impl VoxelWorld {
         self.dirty_chunks.insert(chunk_coord);
 
         // Neighbor chunks need remeshing if an edited voxel lies on a shared boundary
-        let mark_neighbor = |dirty: &mut HashSet<IVec3>, chunks: &HashMap<IVec3, VoxelChunk>, c: IVec3| {
-            if chunks.contains_key(&c) {
-                dirty.insert(c);
-            }
-        };
+        let mark_neighbor =
+            |dirty: &mut HashSet<IVec3>, chunks: &HashMap<IVec3, VoxelChunk>, c: IVec3| {
+                if chunks.contains_key(&c) {
+                    dirty.insert(c);
+                }
+            };
         if lx == 0 {
             mark_neighbor(&mut self.dirty_chunks, &self.chunks, chunk_coord - IVec3::X);
         } else if lx == CHUNK_SIZE - 1 {
@@ -225,7 +297,7 @@ impl VoxelWorld {
     }
 
     /// Fast unchecked voxel write used during batch map generation.
-    /// Caller must invoke [`Self::mark_all_dirty`] once generation finishes.
+    /// Caller must invoke [`Self::compact_chunks`] and [`Self::mark_all_dirty`] once done.
     #[inline]
     pub fn set_voxel_raw(&mut self, pos: IVec3, id: VoxelId) {
         let (chunk_coord, (lx, ly, lz)) = Self::voxel_to_chunk_and_local(pos);
@@ -237,7 +309,7 @@ impl VoxelWorld {
     }
 
     /// Fast vertical column fill `(vx, y_min..=y_max, vz)` for terrain generation.
-    /// Caller must invoke [`Self::mark_all_dirty`] once generation finishes.
+    /// Caller must invoke [`Self::compact_chunks`] and [`Self::mark_all_dirty`] once done.
     pub fn fill_column_raw(&mut self, vx: i32, vz: i32, y_min: i32, y_max: i32, id: VoxelId) {
         if y_min > y_max {
             return;
@@ -265,6 +337,28 @@ impl VoxelWorld {
         }
     }
 
+    /// Compacts all chunks by collapsing uniform Y-slices and removing empty chunks, then shrinks
+    /// the chunk map capacity to minimize resident RAM.
+    pub fn compact_chunks(&mut self) {
+        self.chunks.retain(|_, chunk| {
+            if chunk.is_empty() {
+                false
+            } else {
+                chunk.compact_uniform_slices();
+                true
+            }
+        });
+        self.chunks.shrink_to_fit();
+    }
+
+    /// Total resident heap + table memory used by all stored voxel chunks in bytes.
+    pub fn memory_bytes(&self) -> usize {
+        let chunks_mem: usize = self.chunks.values().map(VoxelChunk::memory_bytes).sum();
+        let table_overhead =
+            self.chunks.capacity() * (std::mem::size_of::<IVec3>() + std::mem::size_of::<usize>());
+        chunks_mem + table_overhead
+    }
+
     pub fn chunk(&self, coord: IVec3) -> Option<&VoxelChunk> {
         self.chunks.get(&coord)
     }
@@ -277,6 +371,10 @@ impl VoxelWorld {
         self.chunks.len()
     }
 
+    pub fn dirty_chunk_count(&self) -> usize {
+        self.dirty_chunks.len()
+    }
+
     /// Pops up to `limit` dirty chunk coordinates for budgeted per-frame remeshing.
     pub fn take_dirty_chunks(&mut self, limit: usize) -> Vec<IVec3> {
         let mut out = Vec::with_capacity(limit.min(self.dirty_chunks.len()));
@@ -285,6 +383,33 @@ impl VoxelWorld {
         }
         for coord in &out {
             self.dirty_chunks.remove(coord);
+        }
+        out
+    }
+
+    /// Pops up to `limit` dirty chunks prioritized closest-first to `world_center`.
+    /// Used so chunks around the player tank render on frame 1 while distant chunks stream in smoothly.
+    pub fn take_dirty_chunks_nearest(&mut self, world_center: Vec3, limit: usize) -> Vec<IVec3> {
+        if self.dirty_chunks.is_empty() || limit == 0 {
+            return Vec::new();
+        }
+        let mut candidates: Vec<(f32, IVec3)> = self
+            .dirty_chunks
+            .iter()
+            .copied()
+            .map(|c| {
+                let d2 = self.chunk_world_center(c).distance_squared(world_center);
+                (d2, c)
+            })
+            .collect();
+        let count = limit.min(candidates.len());
+        candidates.select_nth_unstable_by(count - 1, |a, b| {
+            a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let mut out = Vec::with_capacity(count);
+        for &(_, coord) in &candidates[..count] {
+            self.dirty_chunks.remove(&coord);
+            out.push(coord);
         }
         out
     }

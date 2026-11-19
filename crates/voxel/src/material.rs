@@ -96,7 +96,7 @@ impl MaterialRegistry {
                 durability: 25.0,
                 blast_resistance: 1.0,
                 armor_equiv_mm: 4.0,
-                color_jitter: 0.045,
+                color_jitter: 0.025,
             },
             // 2: GRASS_DARK
             VoxelMaterial {
@@ -106,7 +106,7 @@ impl MaterialRegistry {
                 durability: 25.0,
                 blast_resistance: 1.0,
                 armor_equiv_mm: 4.0,
-                color_jitter: 0.04,
+                color_jitter: 0.022,
             },
             // 3: DIRT
             VoxelMaterial {
@@ -116,7 +116,7 @@ impl MaterialRegistry {
                 durability: 35.0,
                 blast_resistance: 1.4,
                 armor_equiv_mm: 8.0,
-                color_jitter: 0.04,
+                color_jitter: 0.022,
             },
             // 4: CONCRETE
             VoxelMaterial {
@@ -126,7 +126,7 @@ impl MaterialRegistry {
                 durability: 140.0,
                 blast_resistance: 4.5,
                 armor_equiv_mm: 25.0,
-                color_jitter: 0.03,
+                color_jitter: 0.0,
             },
             // 5: CONCRETE_DARK
             VoxelMaterial {
@@ -136,7 +136,7 @@ impl MaterialRegistry {
                 durability: 160.0,
                 blast_resistance: 5.0,
                 armor_equiv_mm: 30.0,
-                color_jitter: 0.025,
+                color_jitter: 0.0,
             },
             // 6: RANGE_MARKER
             VoxelMaterial {
@@ -146,7 +146,7 @@ impl MaterialRegistry {
                 durability: 120.0,
                 blast_resistance: 4.0,
                 armor_equiv_mm: 20.0,
-                color_jitter: 0.015,
+                color_jitter: 0.0,
             },
             // 7: STEEL_OLIVE
             VoxelMaterial {
@@ -156,7 +156,7 @@ impl MaterialRegistry {
                 durability: 500.0,
                 blast_resistance: 20.0,
                 armor_equiv_mm: 80.0,
-                color_jitter: 0.018,
+                color_jitter: 0.0,
             },
             // 8: STEEL_OLIVE_DARK
             VoxelMaterial {
@@ -166,7 +166,7 @@ impl MaterialRegistry {
                 durability: 500.0,
                 blast_resistance: 20.0,
                 armor_equiv_mm: 80.0,
-                color_jitter: 0.015,
+                color_jitter: 0.0,
             },
             // 9: STEEL_TRACK
             VoxelMaterial {
@@ -176,7 +176,7 @@ impl MaterialRegistry {
                 durability: 400.0,
                 blast_resistance: 15.0,
                 armor_equiv_mm: 30.0,
-                color_jitter: 0.02,
+                color_jitter: 0.0,
             },
             // 10: STEEL_GUN
             VoxelMaterial {
@@ -186,7 +186,7 @@ impl MaterialRegistry {
                 durability: 450.0,
                 blast_resistance: 18.0,
                 armor_equiv_mm: 60.0,
-                color_jitter: 0.012,
+                color_jitter: 0.0,
             },
             // 11: STEEL_ACCENT
             VoxelMaterial {
@@ -196,7 +196,7 @@ impl MaterialRegistry {
                 durability: 400.0,
                 blast_resistance: 16.0,
                 armor_equiv_mm: 40.0,
-                color_jitter: 0.012,
+                color_jitter: 0.0,
             },
             // 12: GLASS_OPTIC
             VoxelMaterial {
@@ -216,7 +216,7 @@ impl MaterialRegistry {
                 durability: 200.0,
                 blast_resistance: 8.0,
                 armor_equiv_mm: 15.0,
-                color_jitter: 0.01,
+                color_jitter: 0.0,
             },
             // 14: ROAD_ASPHALT
             VoxelMaterial {
@@ -226,7 +226,7 @@ impl MaterialRegistry {
                 durability: 130.0,
                 blast_resistance: 4.0,
                 armor_equiv_mm: 20.0,
-                color_jitter: 0.025,
+                color_jitter: 0.0,
             },
             // 15: COBBLESTONE
             VoxelMaterial {
@@ -236,7 +236,7 @@ impl MaterialRegistry {
                 durability: 115.0,
                 blast_resistance: 3.8,
                 armor_equiv_mm: 18.0,
-                color_jitter: 0.045,
+                color_jitter: 0.0,
             },
             // 16: ROCK
             VoxelMaterial {
@@ -246,7 +246,7 @@ impl MaterialRegistry {
                 durability: 220.0,
                 blast_resistance: 8.0,
                 armor_equiv_mm: 45.0,
-                color_jitter: 0.05,
+                color_jitter: 0.03,
             },
             // 17: BRICK
             VoxelMaterial {
@@ -256,7 +256,7 @@ impl MaterialRegistry {
                 durability: 100.0,
                 blast_resistance: 3.2,
                 armor_equiv_mm: 22.0,
-                color_jitter: 0.04,
+                color_jitter: 0.0,
             },
             // 18: PLASTER_WALL
             VoxelMaterial {
@@ -266,7 +266,7 @@ impl MaterialRegistry {
                 durability: 85.0,
                 blast_resistance: 2.6,
                 armor_equiv_mm: 16.0,
-                color_jitter: 0.03,
+                color_jitter: 0.0,
             },
             // 19: WOOD
             VoxelMaterial {
@@ -276,7 +276,7 @@ impl MaterialRegistry {
                 durability: 45.0,
                 blast_resistance: 1.2,
                 armor_equiv_mm: 6.0,
-                color_jitter: 0.035,
+                color_jitter: 0.0,
             },
             // 20: ROOF_TILE
             VoxelMaterial {
@@ -286,7 +286,7 @@ impl MaterialRegistry {
                 durability: 60.0,
                 blast_resistance: 1.5,
                 armor_equiv_mm: 8.0,
-                color_jitter: 0.035,
+                color_jitter: 0.0,
             },
             // 21: ROOF_SLATE
             VoxelMaterial {
@@ -296,7 +296,7 @@ impl MaterialRegistry {
                 durability: 65.0,
                 blast_resistance: 1.6,
                 armor_equiv_mm: 9.0,
-                color_jitter: 0.03,
+                color_jitter: 0.0,
             },
             // 22: HEDGE
             VoxelMaterial {
@@ -306,7 +306,7 @@ impl MaterialRegistry {
                 durability: 20.0,
                 blast_resistance: 0.6,
                 armor_equiv_mm: 2.0,
-                color_jitter: 0.045,
+                color_jitter: 0.0,
             },
             // 23: WATER (shallow fordable riverbed surface)
             VoxelMaterial {
@@ -316,7 +316,7 @@ impl MaterialRegistry {
                 durability: 999.0,
                 blast_resistance: 99.0,
                 armor_equiv_mm: 1.0,
-                color_jitter: 0.025,
+                color_jitter: 0.0,
             },
             // 24: SANDBAG
             VoxelMaterial {
@@ -326,7 +326,7 @@ impl MaterialRegistry {
                 durability: 70.0,
                 blast_resistance: 2.4,
                 armor_equiv_mm: 12.0,
-                color_jitter: 0.035,
+                color_jitter: 0.0,
             },
             // 25: TREE_TRUNK
             VoxelMaterial {
@@ -336,7 +336,7 @@ impl MaterialRegistry {
                 durability: 55.0,
                 blast_resistance: 1.4,
                 armor_equiv_mm: 8.0,
-                color_jitter: 0.03,
+                color_jitter: 0.0,
             },
             // 26: LEAVES
             VoxelMaterial {
@@ -346,7 +346,7 @@ impl MaterialRegistry {
                 durability: 12.0,
                 blast_resistance: 0.4,
                 armor_equiv_mm: 1.0,
-                color_jitter: 0.05,
+                color_jitter: 0.0,
             },
             // 27: WINDOW_DARK
             VoxelMaterial {
@@ -356,7 +356,7 @@ impl MaterialRegistry {
                 durability: 25.0,
                 blast_resistance: 0.5,
                 armor_equiv_mm: 2.0,
-                color_jitter: 0.01,
+                color_jitter: 0.0,
             },
         ];
 
@@ -375,32 +375,33 @@ impl MaterialRegistry {
         !id.is_air() && self.get(id).is_solid
     }
 
-    /// Quantized shade bucket `0..4` so greedy meshing still merges large uniform strips
-    /// while preserving subtle Teardown-like surface variation.
+    /// Coarse 2-shade macro-patch bucket (`8 m × 8 m` cells) so greedy meshing merges large
+    /// runs of terrain into minimal quads while preserving subtle organic ground breakup.
     #[inline]
     pub fn shade_bucket(&self, id: VoxelId, pos: IVec3) -> u8 {
         if self.get(id).color_jitter <= 0.0 {
             return 0;
         }
-        // Coarse 2x2 cell spatial hash for natural grass/concrete mottling
-        let hx = (pos.x >> 1).wrapping_mul(374_761_393);
-        let hy = (pos.y).wrapping_mul(668_265_263);
-        let hz = (pos.z >> 1).wrapping_mul(2_147_483_647);
+        let hx = (pos.x >> 4).wrapping_mul(374_761_393);
+        let hy = (pos.y >> 3).wrapping_mul(668_265_263);
+        let hz = (pos.z >> 4).wrapping_mul(2_147_483_647);
         let mut h = (hx ^ hy ^ hz) as u32;
         h ^= h >> 13;
         h = h.wrapping_mul(1_274_126_177);
-        ((h >> 16) & 3) as u8
+        ((h >> 16) & 1) as u8
     }
 
-    /// Computes final RGBA color for a voxel given its shade bucket (`0..4`).
+    /// Computes final RGBA color for a voxel given its shade bucket (`0..2`).
     #[inline]
     pub fn color_for_bucket(&self, id: VoxelId, bucket: u8) -> [f32; 4] {
         let mat = self.get(id);
-        let offset = match bucket {
-            0 => -mat.color_jitter,
-            1 => -mat.color_jitter * 0.35,
-            2 => mat.color_jitter * 0.35,
-            _ => mat.color_jitter,
+        if mat.color_jitter <= 0.0 {
+            return mat.base_color;
+        }
+        let offset = if bucket == 0 {
+            -mat.color_jitter
+        } else {
+            mat.color_jitter
         };
         [
             (mat.base_color[0] + offset).clamp(0.0, 1.0),

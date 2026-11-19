@@ -1,5 +1,7 @@
 use bevy::asset::AssetMetaCheck;
 use bevy::prelude::*;
+use bevy::render::RenderPlugin;
+use bevy::render::settings::{MemoryHints, RenderCreation, WgpuSettings};
 use bevy::window::WindowResolution;
 use game::TankGamePlugin;
 
@@ -12,6 +14,13 @@ fn main() {
             DefaultPlugins
                 .set(AssetPlugin {
                     meta_check: AssetMetaCheck::Never,
+                    ..default()
+                })
+                .set(RenderPlugin {
+                    render_creation: RenderCreation::Automatic(Box::new(WgpuSettings {
+                        memory_hints: MemoryHints::MemoryUsage,
+                        ..default()
+                    })),
                     ..default()
                 })
                 .set(WindowPlugin {

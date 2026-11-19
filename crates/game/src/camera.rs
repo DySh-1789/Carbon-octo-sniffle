@@ -1,8 +1,10 @@
 use std::f32::consts::FRAC_PI_2;
 
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
+use bevy::light::{CascadeShadowConfigBuilder, DirectionalLightShadowMap};
 use bevy::pbr::{DistanceFog, FogFalloff};
 use bevy::prelude::*;
+use bevy::render::view::Msaa;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use voxel::raycast_world;
 
@@ -54,7 +56,8 @@ pub struct CameraPlugin;
 
 impl Plugin for CameraPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<TankCameraController>()
+        app.insert_resource(DirectionalLightShadowMap { size: 1024 })
+            .init_resource::<TankCameraController>()
             .add_systems(Startup, setup_scene_lighting_and_camera)
             .add_systems(Update, (handle_camera_controls, update_camera_and_aim).chain());
     }
@@ -78,7 +81,8 @@ fn setup_scene_lighting_and_camera(
         affects_lightmapped_meshes: true,
     });
 
-    // Primary afternoon sun directional light with crisp shadows across hills & village
+    // Primary afternoon sun directional light with memory-efficient 2-cascade 1024px shadow maps
+    // (~8 MB vs Bevy's default 64 MB 4-cascade 2048px shadows)
     commands.spawn((
         DirectionalLight {
             illuminance: 15_500.0,
@@ -86,19 +90,27 @@ fn setup_scene_lighting_and_camera(
             color: Color::srgb(1.0, 0.96, 0.88),
             ..default()
         },
+        CascadeShadowConfigBuilder {
+            num_cascades: 2,
+            first_cascade_far_bound: 34.0,
+            maximum_distance: 165.0,
+            ..default()
+        }
+        .build(),
         Transform::from_xyz(110.0, 155.0, 85.0).looking_at(Vec3::ZERO, Vec3::Y),
     ));
 
     let spawn_pos = to_bevy_vec3(sim.0.player_tank.position);
 
-    // Main 3D tank camera with atmospheric distance fog for valley depth perception
+    // Main 3D tank camera (`Msaa::Off` eliminates heavy 4x multisampled render targets)
     commands.spawn((
         MainTankCamera,
         Camera3d::default(),
+        Msaa::Off,
         Projection::Perspective(PerspectiveProjection {
             fov: 60.0f32.to_radians(),
             near: 0.15,
-            far: 900.0,
+            far: 450.0,
             ..default()
         }),
         DistanceFog {

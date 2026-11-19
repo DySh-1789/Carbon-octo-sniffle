@@ -43,15 +43,15 @@ fn spawn_player_tank(
         ..default()
     });
 
-    let hull_mesh = meshes.add(voxel_mesh_to_bevy(&mesh_voxel_model(
+    let hull_mesh = meshes.add(voxel_mesh_to_bevy(mesh_voxel_model(
         &models.0.hull,
         &sim.0.voxels.materials,
     )));
-    let turret_mesh = meshes.add(voxel_mesh_to_bevy(&mesh_voxel_model(
+    let turret_mesh = meshes.add(voxel_mesh_to_bevy(mesh_voxel_model(
         &models.0.turret,
         &sim.0.voxels.materials,
     )));
-    let barrel_mesh = meshes.add(voxel_mesh_to_bevy(&mesh_voxel_model(
+    let barrel_mesh = meshes.add(voxel_mesh_to_bevy(mesh_voxel_model(
         &models.0.barrel,
         &sim.0.voxels.materials,
     )));

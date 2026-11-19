@@ -163,6 +163,7 @@ pub fn generate_flat_proving_ground(half_extent_m: i32) -> VoxelWorld {
         VoxelId::CONCRETE_DARK,
     );
 
+    world.compact_chunks();
     world.mark_all_dirty();
     world
 }
@@ -188,13 +189,8 @@ pub fn default_metadata_for_world(world: &VoxelWorld, id: &str, name: &str) -> M
 
 /// Generates the Stage 2 full tactical map: **"European Valley"** (`384 × 384 m`, `24 × 24` chunks).
 ///
-/// Features:
-/// - Smooth multi-octave valley terrain with climbable hills, flank hull-down ridges, and perimeter slopes
-/// - Winding shallow fordable stream with a stone arch bridge on the central road and two rocky flank fords
-/// - Central European village (Zone B) with 1–2 story voxel houses, bell-tower church, cobblestone town square,
-///   stone garden walls, and sandbag firing positions
-/// - Western hull-down ridge & bocage hedgerows (Zone A) and Eastern rocky overwatch hilltop (Zone C)
-/// - Full `MapMetadata` with team spawns, tactical positions, capture zones A/B/C, and hillshaded minimap
+/// Vertical elevation is aligned strictly within `vy = 0..=31` (`cy = 0`, single vertical chunk
+/// layer) to keep resident voxel memory and draw calls minimal.
 pub fn generate_european_valley_map() -> (VoxelWorld, MapMetadata) {
     let mut world = VoxelWorld::new(WORLD_VOXEL_SIZE);
 
@@ -204,14 +200,14 @@ pub fn generate_european_valley_map() -> (VoxelWorld, MapMetadata) {
     let max_x = half_vox - 1;
     let min_z = -half_vox;
     let max_z = half_vox - 1;
-    let min_y = -6;
-    let max_y = 50;
+    let min_y = 0;
+    let max_y = 31;
 
     world.bounds_min = IVec3::new(min_x, min_y, min_z);
     world.bounds_max = IVec3::new(max_x, max_y, max_z);
 
-    // Water surface sits cleanly at vy = -2 (top face Y = -0.5 m)
-    const WATER_VY: i32 = -2;
+    // Water surface sits cleanly at vy = 4 (top face Y = 2.5 m)
+    const WATER_VY: i32 = 4;
 
     // 1. Base terrain elevation, valley stream, roads, and square paving
     for vz in min_z..=max_z {
@@ -219,16 +215,19 @@ pub fn generate_european_valley_map() -> (VoxelWorld, MapMetadata) {
         for vx in min_x..=max_x {
             let wx = (vx as f32 + 0.5) * WORLD_VOXEL_SIZE;
             let h_m = european_valley_height_m(wx, wz);
-            let top_vy = (h_m / WORLD_VOXEL_SIZE).round() as i32 - 1;
+            let top_vy = ((h_m / WORLD_VOXEL_SIZE).round() as i32 - 1).clamp(min_y + 1, max_y - 2);
 
             if top_vy < WATER_VY {
-                // Shallow stream bed + water surface
-                world.fill_column_raw(vx, vz, min_y, top_vy, VoxelId::DIRT);
+                // Uniform rock bedrock beneath shallow dirt streambed + water surface
+                world.fill_column_raw(vx, vz, min_y, (top_vy - 1).max(min_y), VoxelId::ROCK);
+                if top_vy > min_y {
+                    world.set_voxel_raw(IVec3::new(vx, top_vy, vz), VoxelId::DIRT);
+                }
                 world.fill_column_raw(vx, vz, top_vy + 1, WATER_VY, VoxelId::WATER);
             } else {
-                // Rock subsoil below dirt, then surface cover material
+                // Uniform rock bedrock beneath 1 dirt subsoil layer and surface cover
                 let subsoil_top = (top_vy - 1).max(min_y);
-                let rock_top = (top_vy - 3).max(min_y);
+                let rock_top = (top_vy - 2).max(min_y);
                 if rock_top >= min_y {
                     world.fill_column_raw(vx, vz, min_y, rock_top, VoxelId::ROCK);
                 }
@@ -335,6 +334,7 @@ pub fn generate_european_valley_map() -> (VoxelWorld, MapMetadata) {
     // (explicitly excludes roads, stream, buildings, capture zones, and spawn pads)
     place_valley_trees(&mut world, &houses, &zone_defs_xz);
 
+    world.compact_chunks();
     world.mark_all_dirty();
 
     // 7. Build tactical MapMetadata with accurate ground heights
@@ -493,9 +493,10 @@ fn european_valley_height_m(wx: f32, wz: f32) -> f32 {
     // 5. Natural perimeter valley walls near edges (|x| or |z| > 164 m)
     let edge = wx.abs().max(wz.abs());
     let rim = smoothstep(162.0, 190.0, edge);
-    h += rim * 7.5;
+    h += rim * 5.2;
 
-    h
+    // Shift +3.0 m upward so bedrock sits at vy = 0 (Y = 0.0 m) and entire map fits in cy = 0
+    (h + 3.0).clamp(1.2, 15.0)
 }
 
 /// Returns whether `(wx, wz)` lies on the main asphalt road, cobblestone town square, or dirt flank road.
@@ -554,12 +555,12 @@ fn select_surface_material(wx: f32, wz: f32, height_m: f32) -> VoxelId {
 
     // Muddy/gravel riverbanks close to the stream
     let d_stream = (wz - stream_center_z(wx)).abs();
-    if d_stream < 10.5 && height_m < 0.75 {
+    if d_stream < 10.5 && height_m < 3.75 {
         return VoxelId::DIRT;
     }
 
     // Rocky upper slopes & valley rim
-    if height_m > 11.2 {
+    if height_m > 12.8 {
         return VoxelId::ROCK;
     }
 
@@ -619,7 +620,8 @@ fn build_stone_bridge(world: &mut VoxelWorld, water_vy: i32) {
             let is_abutment = dist_from_center >= 9.5;
             let is_pier = (dist_from_center - 4.5).abs() < 1.0 && (is_parapet || vx.abs() <= 1);
             if is_abutment || is_pier {
-                world.fill_column_raw(vx, vz, water_vy - 3, deck_vy - 2, VoxelId::COBBLESTONE);
+                let pier_bot = (water_vy - 3).max(world.bounds_min.y);
+                world.fill_column_raw(vx, vz, pier_bot, deck_vy - 2, VoxelId::COBBLESTONE);
             } else {
                 // Keep arch channel clear above water
                 for vy in (water_vy + 1)..=(deck_vy - 2) {
@@ -696,13 +698,14 @@ fn build_house(world: &mut VoxelWorld, spec: &HouseSpec) {
     // Sample ground at footprint center for flush foundation
     let base_h = european_valley_height_m(spec.cx, spec.cz);
     let floor_vy = (base_h / WORLD_VOXEL_SIZE).round() as i32 - 1;
-    let wall_h = if spec.stories >= 2 { 13 } else { 7 }; // 6.5 m or 3.5 m
-    let top_wall_vy = floor_vy + wall_h;
+    let wall_h = if spec.stories >= 2 { 12 } else { 7 }; // 6.0 m or 3.5 m
+    let top_wall_vy = (floor_vy + wall_h).min(world.bounds_max.y - 4);
+    let foundation_bot = (floor_vy - 5).max(world.bounds_min.y);
 
     // 1. Foundation plinth + floor slab + clear interior air
     for vz in min_z..=max_z {
         for vx in min_x..=max_x {
-            world.fill_column_raw(vx, vz, floor_vy - 5, floor_vy, VoxelId::COBBLESTONE);
+            world.fill_column_raw(vx, vz, foundation_bot, floor_vy, VoxelId::COBBLESTONE);
             for vy in (floor_vy + 1)..=top_wall_vy {
                 world.set_voxel_raw(IVec3::new(vx, vy, vz), VoxelId::AIR);
             }
@@ -767,10 +770,13 @@ fn build_house(world: &mut VoxelWorld, spec: &HouseSpec) {
     // 3. Pitched gable roof with 1-voxel overhang eaves along the shorter span
     let gable_along_x = (max_x - min_x) <= (max_z - min_z);
     let half_span = if gable_along_x { half_w } else { half_d };
-    let roof_layers = (half_span / 2 + 2).clamp(3, 7);
+    let roof_layers = (half_span / 2 + 2).clamp(3, 6);
 
     for step in 0..roof_layers {
         let vy = top_wall_vy + 1 + step;
+        if vy > world.bounds_max.y {
+            break;
+        }
         let inset = step - 1; // step 0 overhangs by 1 voxel!
         if gable_along_x {
             let rx_min = min_x + inset;
@@ -812,7 +818,8 @@ fn build_house(world: &mut VoxelWorld, spec: &HouseSpec) {
     }
 }
 
-/// Builds a landmark European village church with a tall stone bell tower and slate spire.
+/// Builds a landmark European village church with a tall stone bell tower and slate spire
+/// sized to stay cleanly inside the primary `vy = 0..=31` chunk layer.
 fn build_village_church(world: &mut VoxelWorld, cx: f32, cz: f32) {
     // Main nave
     let nave = HouseSpec::new(
@@ -831,29 +838,30 @@ fn build_village_church(world: &mut VoxelWorld, cx: f32, cz: f32) {
     let tower_cx = cx - 4.5;
     let tower_cvx = (tower_cx / WORLD_VOXEL_SIZE).round() as i32;
     let tower_cvz = (cz / WORLD_VOXEL_SIZE).round() as i32;
-    let half = 5; // 5.5 m square tower
+    let half = 4; // 4.5 m square tower
     let base_vy = (european_valley_height_m(tower_cx, cz) / WORLD_VOXEL_SIZE).round() as i32 - 1;
-    let tower_h = 26; // 13 m stone shaft + spire
+    let tower_h = 17; // 8.5 m stone shaft + 2.5 m slate spire = 11 m above village
+    let foundation_bot = (base_vy - 5).max(world.bounds_min.y);
 
     for vz in (tower_cvz - half)..=(tower_cvz + half) {
         for vx in (tower_cvx - half)..=(tower_cvx + half) {
-            world.fill_column_raw(vx, vz, base_vy - 5, base_vy, VoxelId::COBBLESTONE);
+            world.fill_column_raw(vx, vz, foundation_bot, base_vy, VoxelId::COBBLESTONE);
             let on_edge = vx == tower_cvx - half
                 || vx == tower_cvx + half
                 || vz == tower_cvz - half
                 || vz == tower_cvz + half;
-            for vy in (base_vy + 1)..=(base_vy + tower_h) {
+            for vy in (base_vy + 1)..=(base_vy + tower_h).min(world.bounds_max.y) {
                 let rel_y = vy - base_vy;
                 if !on_edge {
                     world.set_voxel_raw(IVec3::new(vx, vy, vz), VoxelId::AIR);
                     continue;
                 }
                 // Belfry openings near top of tower
-                let is_belfry = (20..=24).contains(&rel_y)
+                let is_belfry = (12..=15).contains(&rel_y)
                     && ((vx - tower_cvx).abs() <= 1 || (vz - tower_cvz).abs() <= 1);
                 let mat = if is_belfry {
                     VoxelId::WINDOW_DARK
-                } else if rel_y == 14 || rel_y == tower_h {
+                } else if rel_y == 10 || rel_y == tower_h {
                     VoxelId::PLASTER_WALL
                 } else {
                     VoxelId::COBBLESTONE
@@ -863,16 +871,16 @@ fn build_village_church(world: &mut VoxelWorld, cx: f32, cz: f32) {
         }
     }
 
-    // Stepped slate spire atop the bell tower
+    // Stepped slate spire atop the bell tower (stays strictly <= bounds_max.y = 31)
     for step in 0..=half {
-        let vy_base = base_vy + tower_h + 1 + step * 2;
+        let vy = base_vy + tower_h + 1 + step;
+        if vy > world.bounds_max.y {
+            break;
+        }
         let r = half - step;
-        for dy in 0..2 {
-            let vy = (vy_base + dy).min(world.bounds_max.y);
-            for vz in (tower_cvz - r)..=(tower_cvz + r) {
-                for vx in (tower_cvx - r)..=(tower_cvx + r) {
-                    world.set_voxel_raw(IVec3::new(vx, vy, vz), VoxelId::ROOF_SLATE);
-                }
+        for vz in (tower_cvz - r)..=(tower_cvz + r) {
+            for vx in (tower_cvx - r)..=(tower_cvx + r) {
+                world.set_voxel_raw(IVec3::new(vx, vy, vz), VoxelId::ROOF_SLATE);
             }
         }
     }
@@ -899,12 +907,13 @@ fn build_low_wall(
         let cvx = (wx / WORLD_VOXEL_SIZE).floor() as i32;
         let cvz = (wz / WORLD_VOXEL_SIZE).floor() as i32;
         let base_vy = (european_valley_height_m(wx, wz) / WORLD_VOXEL_SIZE).round() as i32 - 1;
+        let top_vy = (base_vy + height_vox).min(world.bounds_max.y);
 
         for dz in -thickness..=thickness {
             for dx in -thickness..=thickness {
                 let vx = cvx + dx;
                 let vz = cvz + dz;
-                world.fill_column_raw(vx, vz, base_vy + 1, base_vy + height_vox, mat);
+                world.fill_column_raw(vx, vz, base_vy + 1, top_vy, mat);
             }
         }
     }
@@ -933,8 +942,8 @@ fn build_boulder(world: &mut VoxelWorld, cx: f32, cz: f32, radius_m: f32, height
             world.fill_column_raw(
                 cvx + dx,
                 cvz + dz,
-                base_vy - 1,
-                base_vy + local_h,
+                (base_vy - 1).max(world.bounds_min.y),
+                (base_vy + local_h).min(world.bounds_max.y),
                 VoxelId::ROCK,
             );
         }
@@ -1051,50 +1060,37 @@ fn is_tree_spot_clear(
     true
 }
 
-/// Builds a single voxel tree with trunk clearance >= 3.0 m beneath foliage canopy.
+/// Builds a single stylized voxel tree with trunk clearance >= 3.0 m beneath foliage canopy.
+/// Uses crisp tiered rectangular canopies so greedy meshing merges each canopy into minimal quads.
 fn build_tree(world: &mut VoxelWorld, wx: f32, wz: f32, is_pine: bool) {
     let cvx = (wx / WORLD_VOXEL_SIZE).round() as i32;
     let cvz = (wz / WORLD_VOXEL_SIZE).round() as i32;
     let base_vy = (european_valley_height_m(wx, wz) / WORLD_VOXEL_SIZE).round() as i32 - 1;
-    if base_vy < 0 {
+    // Grow trees above water and below barren rocky peaks so crowns stay strictly within cy = 0
+    if !(5..=19).contains(&base_vy) {
         return;
     }
 
-    let trunk_h = if is_pine { 9 } else { 8 }; // 4.0–4.5 m trunk
+    let trunk_h = if is_pine { 8 } else { 7 }; // 3.5–4.0 m trunk
     world.fill_column_raw(cvx, cvz, base_vy + 1, base_vy + trunk_h, VoxelId::TREE_TRUNK);
 
-    if is_pine {
-        // Tiered conifer canopy starting at base_vy + 6 (3.0 m above ground)
-        let layers: &[(i32, i32)] = &[
-            (6, 3),
-            (7, 3),
-            (8, 2),
-            (9, 2),
-            (10, 2),
-            (11, 1),
-            (12, 1),
-            (13, 0),
-        ];
-        for &(dy, r) in layers {
-            let vy = (base_vy + dy).min(world.bounds_max.y);
-            for dz in -r..=r {
-                for dx in -r..=r {
-                    if dx.abs() + dz.abs() <= r + 1 && (dx != 0 || dz != 0 || dy >= trunk_h) {
-                        world.set_voxel_raw(IVec3::new(cvx + dx, vy, cvz + dz), VoxelId::LEAVES);
-                    }
-                }
-            }
-        }
+    let tiers: &[(i32, i32, i32)] = if is_pine {
+        // (dy_start, dy_end, half_radius) — crisp 3-tier conifer silhouette
+        &[(6, 7, 2), (8, 9, 1), (10, 11, 0)]
     } else {
-        // Rounded broadleaf oak crown starting at base_vy + 7 (3.5 m above ground)
-        let crown_center_y = base_vy + 9;
-        let r = 3i32;
-        for dy in -2..=3 {
-            let vy = (crown_center_y + dy).min(world.bounds_max.y);
+        // Crisp 2-tier broadleaf oak canopy
+        &[(6, 8, 2), (9, 10, 1)]
+    };
+
+    for &(dy0, dy1, r) in tiers {
+        for dy in dy0..=dy1 {
+            let vy = base_vy + dy;
+            if vy > world.bounds_max.y {
+                continue;
+            }
             for dz in -r..=r {
                 for dx in -r..=r {
-                    let dist2 = dx * dx + dz * dz + dy * dy * 2;
-                    if dist2 <= 12 && (dx != 0 || dz != 0 || vy > base_vy + trunk_h) {
+                    if dx != 0 || dz != 0 || dy > trunk_h {
                         world.set_voxel_raw(IVec3::new(cvx + dx, vy, cvz + dz), VoxelId::LEAVES);
                     }
                 }

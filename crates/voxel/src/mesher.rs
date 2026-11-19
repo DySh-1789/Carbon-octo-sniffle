@@ -129,7 +129,8 @@ where
 ///
 /// Vertex positions are emitted in local meters:
 /// `(local_voxel_coord - pivot) * voxel_size`.
-fn greedy_mesh_volume<FG, FS>(
+#[allow(clippy::too_many_arguments)]
+fn greedy_mesh_volume<FG, FS, FC, FY>(
     dims: IVec3,
     voxel_origin: IVec3,
     pivot: Vec3,
@@ -137,12 +138,18 @@ fn greedy_mesh_volume<FG, FS>(
     materials: &MaterialRegistry,
     get_voxel: FG,
     is_solid: FS,
+    cull_face: FC,
+    is_y_layer_air: FY,
 ) -> VoxelMeshData
 where
     FG: Fn(IVec3) -> VoxelId,
     FS: Fn(IVec3) -> bool,
+    FC: Fn(IVec3, IVec3) -> bool,
+    FY: Fn(i32) -> bool,
 {
     let mut mesh = VoxelMeshData::default();
+    let max_mask_len = (dims.x * dims.y).max(dims.y * dims.z).max(dims.x * dims.z) as usize;
+    let mut mask: Vec<Option<MaskCell>> = vec![None; max_mask_len];
 
     for face in &FACES {
         let n_idx = axis_index(face.normal);
@@ -152,12 +159,26 @@ where
         let n_len = dims[n_idx];
         let u_len = dims[u_idx] as usize;
         let v_len = dims[v_idx] as usize;
-        let mut mask: Vec<Option<MaskCell>> = vec![None; u_len * v_len];
 
         for slice in 0..n_len {
+            // Fast skip when sweeping horizontal Y-slices that are completely air
+            if n_idx == 1 && is_y_layer_air(slice) {
+                continue;
+            }
+
+            let mut any_visible = false;
             // Fill 2D face mask for this slice
             for v in 0..v_len {
+                if v_idx == 1 && is_y_layer_air(v as i32) {
+                    let row = v * u_len;
+                    mask[row..row + u_len].fill(None);
+                    continue;
+                }
                 for u in 0..u_len {
+                    if u_idx == 1 && is_y_layer_air(u as i32) {
+                        mask[u + v * u_len] = None;
+                        continue;
+                    }
                     let mut local = IVec3::ZERO;
                     local[n_idx] = slice;
                     local[u_idx] = u as i32;
@@ -169,8 +190,8 @@ where
                         mask[u + v * u_len] = None;
                         continue;
                     }
-                    // Face is visible only if neighbor along outward normal is not solid
-                    if is_solid(sample_pos + face.normal) {
+                    // Cull faces hidden behind neighboring solids or outside playable world shell
+                    if cull_face(sample_pos, face.normal) || is_solid(sample_pos + face.normal) {
                         mask[u + v * u_len] = None;
                         continue;
                     }
@@ -181,7 +202,12 @@ where
                         shade_bucket,
                         ao,
                     });
+                    any_visible = true;
                 }
+            }
+
+            if !any_visible {
+                continue;
             }
 
             // Greedy merge rectangles inside the 2D mask
@@ -273,6 +299,10 @@ where
         }
     }
 
+    mesh.positions.shrink_to_fit();
+    mesh.normals.shrink_to_fit();
+    mesh.colors.shrink_to_fit();
+    mesh.indices.shrink_to_fit();
     mesh
 }
 
@@ -291,18 +321,43 @@ fn axis_index(v: IVec3) -> usize {
 ///
 /// The returned vertex coordinates are relative to `world.chunk_world_origin(chunk_coord)`.
 pub fn mesh_world_chunk(world: &VoxelWorld, chunk_coord: IVec3) -> VoxelMeshData {
-    if world.chunk(chunk_coord).is_none() {
+    let Some(chunk) = world.chunk(chunk_coord) else {
         return VoxelMeshData::default();
-    }
+    };
     let voxel_origin = chunk_coord * CHUNK_SIZE_I32;
+    let has_bounds = world.bounds_min != world.bounds_max;
+    let bmin = world.bounds_min;
+    let bmax = world.bounds_max;
+
+    // Precompute which local Y-slices in this chunk are completely Air
+    let mut air_y = [false; CHUNK_SIZE];
+    for (ly, slot) in air_y.iter_mut().enumerate() {
+        *slot = chunk.uniform_slice(ly).is_some_and(VoxelId::is_air);
+    }
+
     greedy_mesh_volume(
         IVec3::splat(CHUNK_SIZE as i32),
         voxel_origin,
         Vec3::ZERO,
         world.voxel_size,
         &world.materials,
-        |pos| world.get_voxel(pos),
+        |pos| {
+            let local = pos - voxel_origin;
+            chunk.get(local.x as usize, local.y as usize, local.z as usize)
+        },
         |pos| world.is_solid(pos),
+        |pos, normal| {
+            if !has_bounds {
+                return false;
+            }
+            // Never emit unseen underside of the world bedrock or outer perimeter skirt faces
+            (normal.y == -1 && pos.y == bmin.y)
+                || (normal.x == -1 && pos.x == bmin.x)
+                || (normal.x == 1 && pos.x == bmax.x)
+                || (normal.z == -1 && pos.z == bmin.z)
+                || (normal.z == 1 && pos.z == bmax.z)
+        },
+        |ly| air_y[ly as usize],
     )
 }
 
@@ -316,5 +371,7 @@ pub fn mesh_voxel_model(model: &VoxelModel, materials: &MaterialRegistry) -> Vox
         materials,
         |pos| model.get(pos),
         |pos| materials.is_solid(model.get(pos)),
+        |_, _| false,
+        |_| false,
     )
 }

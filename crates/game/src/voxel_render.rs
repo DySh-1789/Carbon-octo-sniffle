@@ -8,6 +8,14 @@ use voxel::{VoxelMeshData, mesh_world_chunk};
 
 use crate::bridge::{SimResource, to_bevy_vec3};
 
+/// Number of chunks nearest to spawn meshed immediately on startup so the visible area is solid on Frame 1.
+const INITIAL_NEAR_CHUNKS: usize = 36;
+
+/// Max dirty chunks meshed per frame during streaming & runtime updates.
+/// Keeping batches modest lets `RenderAssetUsages::RENDER_WORLD` release CPU mesh memory between
+/// frames and avoids huge WASM/wgpu Frame-0 staging buffer spikes.
+const STREAM_CHUNKS_PER_FRAME: usize = 16;
+
 /// Tracks spawned Bevy entities corresponding to meshed voxel chunks.
 #[derive(Resource, Default)]
 pub struct ChunkMeshEntities {
@@ -23,16 +31,23 @@ pub struct VoxelChunkMesh {
     pub coord: IVec3,
 }
 
-/// Converts a greedy-meshed `VoxelMeshData` into a Bevy `Mesh`.
-pub fn voxel_mesh_to_bevy(data: &VoxelMeshData) -> Mesh {
+/// Converts a greedy-meshed `VoxelMeshData` into a Bevy `Mesh` by value (zero vector cloning)
+/// and packs triangle indices as `U16` whenever vertex count fits (`<= 65,535`), halving index RAM.
+pub fn voxel_mesh_to_bevy(data: VoxelMeshData) -> Mesh {
+    let use_u16 = data.positions.len() <= u16::MAX as usize;
     let mut mesh = Mesh::new(
         PrimitiveTopology::TriangleList,
         RenderAssetUsages::RENDER_WORLD,
     );
-    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, data.positions.clone());
-    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, data.normals.clone());
-    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, data.colors.clone());
-    mesh.insert_indices(Indices::U32(data.indices.clone()));
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, data.positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, data.normals);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, data.colors);
+    if use_u16 {
+        let indices_u16: Vec<u16> = data.indices.into_iter().map(|i| i as u16).collect();
+        mesh.insert_indices(Indices::U16(indices_u16));
+    } else {
+        mesh.insert_indices(Indices::U32(data.indices));
+    }
     mesh
 }
 
@@ -64,7 +79,11 @@ fn build_initial_world_chunks(
     material: Res<WorldVoxelMaterial>,
     mut registry: ResMut<ChunkMeshEntities>,
 ) {
-    let dirty = sim.0.voxels.take_dirty_chunks(usize::MAX);
+    let focus = sim.0.player_tank.position;
+    let dirty = sim
+        .0
+        .voxels
+        .take_dirty_chunks_nearest(focus, INITIAL_NEAR_CHUNKS);
     rebuild_chunks(&mut commands, &sim.0, &mut meshes, &material.0, &mut registry, &dirty);
 }
 
@@ -75,11 +94,14 @@ fn sync_dirty_world_chunks(
     material: Res<WorldVoxelMaterial>,
     mut registry: ResMut<ChunkMeshEntities>,
 ) {
-    // Budgeted remeshing (max 4 chunks per frame) to prevent frame drops during explosions
-    let dirty = sim.0.voxels.take_dirty_chunks(4);
-    if dirty.is_empty() {
+    if sim.0.voxels.dirty_chunk_count() == 0 {
         return;
     }
+    let focus = sim.0.player_tank.position;
+    let dirty = sim
+        .0
+        .voxels
+        .take_dirty_chunks_nearest(focus, STREAM_CHUNKS_PER_FRAME);
     rebuild_chunks(&mut commands, &sim.0, &mut meshes, &material.0, &mut registry, &dirty);
 }
 
@@ -100,7 +122,7 @@ fn rebuild_chunks(
         if mesh_data.is_empty() {
             continue;
         }
-        let mesh_handle = meshes.add(voxel_mesh_to_bevy(&mesh_data));
+        let mesh_handle = meshes.add(voxel_mesh_to_bevy(mesh_data));
         let origin = to_bevy_vec3(sim.voxels.chunk_world_origin(coord));
         let entity = commands
             .spawn((
