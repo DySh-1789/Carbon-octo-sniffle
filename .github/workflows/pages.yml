@@ -1,0 +1,78 @@
+name: Deploy GitHub Pages (WASM)
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable + wasm32 target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: wasm-pages
+
+      - name: Build Bevy game for wasm32-unknown-unknown
+        env:
+          RUSTFLAGS: '--cfg getrandom_backend="wasm_js"'
+        run: cargo build -p game --release --target wasm32-unknown-unknown
+
+      - name: Install matching wasm-bindgen-cli
+        run: |
+          WBG_VER=$(cargo metadata --format-version 1 --locked | python3 -c "
+          import json, sys
+          data = json.load(sys.stdin)
+          for p in data['packages']:
+              if p['name'] == 'wasm-bindgen':
+                  print(p['version'])
+                  break
+          ")
+          echo "Detected wasm-bindgen version: $WBG_VER"
+          cargo install --locked wasm-bindgen-cli --version "$WBG_VER"
+
+      - name: Generate JS/WASM bundle for GitHub Pages
+        run: |
+          mkdir -p dist
+          wasm-bindgen \
+            --out-dir dist \
+            --out-name carbon_armor \
+            --target web \
+            --no-typescript \
+            target/wasm32-unknown-unknown/release/game.wasm
+          cp web/index.html dist/index.html
+          touch dist/.nojekyll
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

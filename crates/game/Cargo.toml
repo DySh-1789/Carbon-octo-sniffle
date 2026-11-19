@@ -1,0 +1,31 @@
+[package]
+name = "game"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+voxel = { path = "../voxel" }
+sim = { path = "../sim" }
+bevy = { version = "0.20", default-features = false, features = [
+    "default_app",
+    "3d_bevy_render",
+    "ui_bevy_render",
+    "bevy_ui_widgets",
+    "bevy_winit",
+    "x11",
+    "wayland",
+    "default_font",
+    "multi_threaded",
+    "std",
+    "custom_cursor",
+] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+bevy = { version = "0.20", default-features = false, features = [
+    "web",
+    "webgl2",
+] }
+console_error_panic_hook = "0.1"
+getrandom = { version = "0.4", features = ["wasm_js"] }
+getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }

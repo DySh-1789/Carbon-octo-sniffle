@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Carbon Armor — Voxel Tank Simulator (Rust + Bevy)</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #101513;
+      color: #e6ebe4;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    }
+    #app-container {
+      position: relative;
+      width: 100vw;
+      height: 100vh;
+    }
+    #bevy-canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+      outline: none;
+    }
+    #loading-overlay {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 14px;
+      background: radial-gradient(circle at center, #1b241f 0%, #0d1210 100%);
+      z-index: 10;
+      transition: opacity 0.35s ease;
+    }
+    #loading-overlay.hidden {
+      opacity: 0;
+      pointer-events: none;
+    }
+    .title {
+      font-size: 28px;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      color: #ebd067;
+      text-transform: uppercase;
+    }
+    .subtitle {
+      font-size: 14px;
+      color: #b5c0b2;
+    }
+    .spinner {
+      width: 38px;
+      height: 38px;
+      border: 3px solid rgba(235, 208, 103, 0.25);
+      border-top-color: #ebd067;
+      border-radius: 50%;
+      animation: spin 0.9s linear infinite;
+    }
+    .error-box {
+      max-width: 520px;
+      padding: 14px 18px;
+      background: rgba(160, 42, 34, 0.25);
+      border: 1px solid rgba(230, 80, 68, 0.6);
+      border-radius: 6px;
+      font-size: 13px;
+      line-height: 1.5;
+      text-align: center;
+      display: none;
+    }
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+  </style>
+</head>
+<body>
+  <div id="app-container">
+    <canvas id="bevy-canvas"></canvas>
+    <div id="loading-overlay">
+      <div class="title">Carbon Armor</div>
+      <div class="spinner" id="spinner"></div>
+      <div class="subtitle" id="status-text">Загрузка WebAssembly (Rust + Bevy 0.20 / WebGL2)...</div>
+      <div class="error-box" id="error-box"></div>
+    </div>
+  </div>
+
+  <script type="module">
+    import init from './carbon_armor.js';
+
+    const overlay = document.getElementById('loading-overlay');
+    const spinner = document.getElementById('spinner');
+    const statusText = document.getElementById('status-text');
+    const errorBox = document.getElementById('error-box');
+
+    async function boot() {
+      try {
+        await init();
+        overlay.classList.add('hidden');
+      } catch (err) {
+        // Bevy/winit intentionally throws a control-flow exception to hand off the event loop
+        if (err && String(err.message || err).includes('Using exceptions for control flow')) {
+          overlay.classList.add('hidden');
+          return;
+        }
+        console.error('Failed to initialize Carbon Armor WASM:', err);
+        spinner.style.display = 'none';
+        statusText.textContent = 'Не удалось запустить WebGL2-клиент';
+        errorBox.style.display = 'block';
+        errorBox.textContent =
+          'Убедитесь, что в браузере включён WebGL2 (аппаратное ускорение). Детали: ' +
+          String(err);
+      }
+    }
+
+    boot();
+  </script>
+</body>
+</html>
