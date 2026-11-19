@@ -7,6 +7,7 @@
 
 use std::f32::consts::TAU;
 
+use serde::{Deserialize, Serialize};
 use voxel::glam::{Quat, Vec3};
 
 use crate::battle::{SimRng, TankId, Team};
@@ -23,7 +24,7 @@ pub const FIRE_BURNOUT_TIME: f32 = 14.0;
 pub const NO_LOADER_RELOAD_MULT: f32 = 1.8;
 
 /// Armor metallurgy resistance modifier.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ArmorType {
     /// Rolled Homogeneous Armor (`1.00x`).
     Rha,
@@ -48,6 +49,58 @@ impl ArmorType {
             ArmorType::Rha => "RHA",
             ArmorType::Cha => "CHA",
             ArmorType::TrackSteel => "TRACK",
+        }
+    }
+}
+
+/// Per-vehicle historical armor scheme and internal layout flags.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ArmorProfile {
+    pub ufp_mm: f32,
+    pub ufp_slope_deg: f32,
+    /// True for Soviet V-shaped pike-nose hulls (IS-3) adding horizontal wedge obliquity.
+    pub pike_nose: bool,
+    pub lfp_mm: f32,
+    pub lfp_slope_deg: f32,
+    pub hull_side_mm: f32,
+    pub hull_rear_mm: f32,
+    pub hull_roof_mm: f32,
+    pub hull_armor_type: ArmorType,
+    pub turret_front_mm: f32,
+    pub turret_mantlet_mm: f32,
+    pub turret_side_mm: f32,
+    pub turret_rear_mm: f32,
+    pub turret_roof_mm: f32,
+    pub turret_armor_type: ArmorType,
+    pub is_casemate: bool,
+    /// Front-mounted transmission (USA / Germany) vs rear drive (USSR).
+    pub front_transmission: bool,
+    /// Historical crew count (`3..=5` modeled seats).
+    pub crew_count: u8,
+}
+
+impl ArmorProfile {
+    /// Default balanced WWII medium tank armor profile (Stage 4 baseline).
+    pub fn basic_medium_tank() -> Self {
+        Self {
+            ufp_mm: 60.0,
+            ufp_slope_deg: 52.0,
+            pike_nose: false,
+            lfp_mm: 48.0,
+            lfp_slope_deg: 35.0,
+            hull_side_mm: 42.0,
+            hull_rear_mm: 35.0,
+            hull_roof_mm: 20.0,
+            hull_armor_type: ArmorType::Rha,
+            turret_front_mm: 65.0,
+            turret_mantlet_mm: 88.0,
+            turret_side_mm: 48.0,
+            turret_rear_mm: 45.0,
+            turret_roof_mm: 20.0,
+            turret_armor_type: ArmorType::Cha,
+            is_casemate: false,
+            front_transmission: true,
+            crew_count: 5,
         }
     }
 }
@@ -334,10 +387,31 @@ pub struct TankDamageState {
 }
 
 impl TankDamageState {
-    /// Internal layout for the Base Medium Tank matching the `0.2 m` voxel hull & turret dimensions.
+    /// Internal layout for the default Stage 4 Base Medium Tank.
     pub fn basic_medium_tank() -> Self {
+        Self::from_profile(&ArmorProfile::basic_medium_tank())
+    }
+
+    /// Builds a vehicle-specific internal layout (modules + 3/4/5 crew) from [`ArmorProfile`].
+    pub fn from_profile(profile: &ArmorProfile) -> Self {
+        let trans_box = if profile.front_transmission {
+            (Vec3::new(-0.68, 0.22, -2.35), Vec3::new(0.68, 0.68, -1.62))
+        } else {
+            // Rear transmission (Soviet T-34 / KV / IS / T-44-100 layout)
+            (Vec3::new(-0.68, 0.22, 1.90), Vec3::new(0.68, 0.72, 2.48))
+        };
+        let turret_or_hull = if profile.is_casemate {
+            PartFrame::Hull
+        } else {
+            PartFrame::Turret
+        };
+        let breech_box = if profile.is_casemate {
+            (Vec3::new(-0.30, 1.10, -1.25), Vec3::new(0.30, 1.72, -0.25))
+        } else {
+            (Vec3::new(-0.28, 0.18, -1.05), Vec3::new(0.28, 0.74, -0.05))
+        };
+
         let modules = vec![
-            // External tracks (left & right)
             ModuleState::new(
                 ModuleKind::LeftTrack,
                 PartFrame::Hull,
@@ -352,7 +426,6 @@ impl TankDamageState {
                 Vec3::new(1.60, 0.95, 2.90),
                 85.0,
             ),
-            // External gun barrel
             ModuleState::new(
                 ModuleKind::GunBarrel,
                 PartFrame::Gun,
@@ -360,23 +433,20 @@ impl TankDamageState {
                 Vec3::new(0.22, 0.22, 0.0),
                 75.0,
             ),
-            // Front lower transmission
             ModuleState::new(
                 ModuleKind::Transmission,
                 PartFrame::Hull,
-                Vec3::new(-0.68, 0.22, -2.35),
-                Vec3::new(0.68, 0.68, -1.62),
+                trans_box.0,
+                trans_box.1,
                 110.0,
             ),
-            // Rear engine block
             ModuleState::new(
                 ModuleKind::Engine,
                 PartFrame::Hull,
                 Vec3::new(-0.72, 0.30, 0.68),
-                Vec3::new(0.72, 1.22, 2.28),
+                Vec3::new(0.72, 1.22, 2.15),
                 120.0,
             ),
-            // Left & right fuel tanks flanking the engine bay
             ModuleState::new(
                 ModuleKind::FuelTank,
                 PartFrame::Hull,
@@ -391,7 +461,6 @@ impl TankDamageState {
                 Vec3::new(1.05, 1.12, 1.95),
                 80.0,
             ),
-            // Three ammunition stowage racks (hull left sponson, hull floor/right, turret bustle)
             ModuleState::new(
                 ModuleKind::AmmoRack,
                 PartFrame::Hull,
@@ -408,12 +477,19 @@ impl TankDamageState {
             ),
             ModuleState::new(
                 ModuleKind::AmmoRack,
-                PartFrame::Turret,
-                Vec3::new(-0.55, 0.20, 0.58),
-                Vec3::new(0.55, 0.78, 1.22),
+                turret_or_hull,
+                if profile.is_casemate {
+                    Vec3::new(-0.55, 0.85, 0.05)
+                } else {
+                    Vec3::new(-0.55, 0.20, 0.58)
+                },
+                if profile.is_casemate {
+                    Vec3::new(0.55, 1.55, 0.72)
+                } else {
+                    Vec3::new(0.55, 0.78, 1.22)
+                },
                 65.0,
             ),
-            // Turret traverse ring at hull roof collar
             ModuleState::new(
                 ModuleKind::TurretRing,
                 PartFrame::Hull,
@@ -421,53 +497,76 @@ impl TankDamageState {
                 Vec3::new(0.82, 1.44, 0.35),
                 90.0,
             ),
-            // Cannon breech directly behind mantlet
             ModuleState::new(
                 ModuleKind::GunBreech,
-                PartFrame::Turret,
-                Vec3::new(-0.28, 0.18, -1.05),
-                Vec3::new(0.28, 0.74, -0.05),
+                turret_or_hull,
+                breech_box.0,
+                breech_box.1,
                 90.0,
             ),
         ];
 
-        let crew = vec![
-            // Hull front-left Driver
+        // Build historical 3-, 4-, or 5-man crew (Driver, Gunner, Loader, Commander, RadioOp)
+        let mut crew = vec![
             CrewMemberState::new(
                 CrewRole::Driver,
                 PartFrame::Hull,
                 Vec3::new(-0.72, 0.42, -1.58),
                 Vec3::new(-0.14, 1.25, -0.92),
             ),
-            // Hull front-right Radio Operator / bow gunner
             CrewMemberState::new(
+                CrewRole::Gunner,
+                turret_or_hull,
+                if profile.is_casemate {
+                    Vec3::new(-0.76, 0.85, -0.78)
+                } else {
+                    Vec3::new(-0.76, 0.06, -0.78)
+                },
+                if profile.is_casemate {
+                    Vec3::new(-0.26, 1.65, -0.10)
+                } else {
+                    Vec3::new(-0.26, 0.86, -0.10)
+                },
+            ),
+            CrewMemberState::new(
+                CrewRole::Loader,
+                turret_or_hull,
+                if profile.is_casemate {
+                    Vec3::new(0.26, 0.85, -0.62)
+                } else {
+                    Vec3::new(0.26, 0.06, -0.62)
+                },
+                if profile.is_casemate {
+                    Vec3::new(0.78, 1.65, 0.32)
+                } else {
+                    Vec3::new(0.78, 0.88, 0.32)
+                },
+            ),
+        ];
+        if profile.crew_count >= 4 {
+            crew.push(CrewMemberState::new(
+                CrewRole::Commander,
+                turret_or_hull,
+                if profile.is_casemate {
+                    Vec3::new(-0.72, 0.90, -0.04)
+                } else {
+                    Vec3::new(-0.72, 0.12, -0.04)
+                },
+                if profile.is_casemate {
+                    Vec3::new(-0.20, 1.80, 0.56)
+                } else {
+                    Vec3::new(-0.20, 1.04, 0.56)
+                },
+            ));
+        }
+        if profile.crew_count >= 5 {
+            crew.push(CrewMemberState::new(
                 CrewRole::RadioOperator,
                 PartFrame::Hull,
                 Vec3::new(0.14, 0.42, -1.58),
                 Vec3::new(0.72, 1.25, -0.92),
-            ),
-            // Turret left-front Gunner
-            CrewMemberState::new(
-                CrewRole::Gunner,
-                PartFrame::Turret,
-                Vec3::new(-0.76, 0.06, -0.78),
-                Vec3::new(-0.26, 0.86, -0.10),
-            ),
-            // Turret left-rear Commander under cupola
-            CrewMemberState::new(
-                CrewRole::Commander,
-                PartFrame::Turret,
-                Vec3::new(-0.72, 0.12, -0.04),
-                Vec3::new(-0.20, 1.04, 0.56),
-            ),
-            // Turret right Loader
-            CrewMemberState::new(
-                CrewRole::Loader,
-                PartFrame::Turret,
-                Vec3::new(0.26, 0.06, -0.62),
-                Vec3::new(0.78, 0.88, 0.32),
-            ),
-        ];
+            ));
+        }
 
         Self {
             modules,
@@ -830,55 +929,75 @@ fn ray_vs_oriented_box(
     ray_vs_aabb(lo, ld, min, max, max_t).map(|(t, ln)| (t, lo + ld * t, ln))
 }
 
-/// Classifies an entry point on the Base Medium Tank hull armor box into historical plate specs.
-fn classify_hull_plate(local_hit: Vec3, local_normal: Vec3) -> (&'static str, f32, ArmorType, Vec3) {
-    if local_normal.z < -0.5 {
-        // Front hull split into sloped Upper Front Plate (UFP) & Lower Front Plate (LFP)
-        if local_hit.y >= 0.72 {
-            // 52 deg sloped upper glacis: ~90 mm eff straight-on, >112 mm angled 40 deg
-            let sloped = Vec3::new(0.0, 52.0f32.to_radians().sin(), -52.0f32.to_radians().cos());
-            ("Hull UFP", 60.0, ArmorType::Rha, sloped.normalize())
-        } else {
-            // 35 deg downward lower glacis weakspot (~56 mm eff)
-            let sloped = Vec3::new(0.0, -35.0f32.to_radians().sin(), -35.0f32.to_radians().cos());
-            ("Hull LFP", 48.0, ArmorType::Rha, sloped.normalize())
-        }
-    } else if local_normal.z > 0.5 {
-        let sloped = Vec3::new(0.0, 15.0f32.to_radians().sin(), 15.0f32.to_radians().cos());
-        ("Hull Rear", 35.0, ArmorType::Rha, sloped.normalize())
-    } else if local_normal.x.abs() > 0.5 {
-        ("Hull Side", 42.0, ArmorType::Rha, local_normal)
-    } else if local_normal.y > 0.5 {
-        ("Hull Roof", 20.0, ArmorType::Rha, Vec3::Y)
-    } else {
-        ("Hull Belly", 18.0, ArmorType::Rha, Vec3::NEG_Y)
-    }
-}
-
-/// Classifies an entry point on the Base Medium Tank turret armor box.
-fn classify_turret_plate(
+/// Classifies an entry point on a tank hull armor box using its vehicle-specific [`ArmorProfile`].
+fn classify_hull_plate(
+    profile: &ArmorProfile,
     local_hit: Vec3,
     local_normal: Vec3,
 ) -> (&'static str, f32, ArmorType, Vec3) {
+    let atype = profile.hull_armor_type;
+    if local_normal.z < -0.5 {
+        if profile.is_casemate && local_hit.y >= 1.32 {
+            let s = 22.0f32.to_radians();
+            let sloped = Vec3::new(0.0, s.sin(), -s.cos()).normalize();
+            return ("Casemate Front", profile.turret_front_mm, profile.turret_armor_type, sloped);
+        }
+        if local_hit.y >= 0.72 {
+            let s = profile.ufp_slope_deg.to_radians();
+            let side_wedge = if profile.pike_nose {
+                local_hit.x.signum() * 0.42
+            } else {
+                0.0
+            };
+            let sloped = Vec3::new(side_wedge, s.sin(), -s.cos()).normalize();
+            ("Hull UFP", profile.ufp_mm, atype, sloped)
+        } else {
+            let s = profile.lfp_slope_deg.to_radians();
+            let sloped = Vec3::new(0.0, -s.sin(), -s.cos()).normalize();
+            ("Hull LFP", profile.lfp_mm, atype, sloped)
+        }
+    } else if local_normal.z > 0.5 {
+        let sloped = Vec3::new(0.0, 15.0f32.to_radians().sin(), 15.0f32.to_radians().cos());
+        ("Hull Rear", profile.hull_rear_mm, atype, sloped.normalize())
+    } else if local_normal.x.abs() > 0.5 {
+        if profile.is_casemate && local_hit.y >= 1.32 {
+            ("Casemate Side", profile.turret_side_mm, profile.turret_armor_type, local_normal)
+        } else {
+            ("Hull Side", profile.hull_side_mm, atype, local_normal)
+        }
+    } else if local_normal.y > 0.5 {
+        ("Hull Roof", profile.hull_roof_mm, ArmorType::Rha, Vec3::Y)
+    } else {
+        ("Hull Belly", (profile.hull_roof_mm * 0.85).max(12.0), ArmorType::Rha, Vec3::NEG_Y)
+    }
+}
+
+/// Classifies an entry point on a tank turret armor box using its vehicle-specific [`ArmorProfile`].
+fn classify_turret_plate(
+    profile: &ArmorProfile,
+    local_hit: Vec3,
+    local_normal: Vec3,
+) -> (&'static str, f32, ArmorType, Vec3) {
+    let atype = profile.turret_armor_type;
     if local_normal.z < -0.5 {
         if local_hit.x.abs() <= 0.45 && (0.14..=0.86).contains(&local_hit.y) {
             let sloped = Vec3::new(0.0, 16.0f32.to_radians().sin(), -16.0f32.to_radians().cos());
-            ("Gun Mantlet", 88.0, ArmorType::Cha, sloped.normalize())
+            ("Gun Mantlet", profile.turret_mantlet_mm, atype, sloped.normalize())
         } else {
             let side_s = local_hit.x.signum() * 0.34;
             let sloped = Vec3::new(side_s, 0.32, -0.88).normalize();
-            ("Turret Cheek", 65.0, ArmorType::Cha, sloped)
+            ("Turret Cheek", profile.turret_front_mm, atype, sloped)
         }
     } else if local_normal.z > 0.5 {
-        ("Turret Rear", 45.0, ArmorType::Cha, Vec3::Z)
+        ("Turret Rear", profile.turret_rear_mm, atype, Vec3::Z)
     } else if local_normal.x.abs() > 0.5 {
         let sx = local_normal.x.signum();
         let sloped = Vec3::new(sx * 0.94, 0.34, 0.0).normalize();
-        ("Turret Side", 48.0, ArmorType::Cha, sloped)
+        ("Turret Side", profile.turret_side_mm, atype, sloped)
     } else if local_normal.y > 0.5 {
-        ("Turret Roof", 20.0, ArmorType::Rha, Vec3::Y)
+        ("Turret Roof", profile.turret_roof_mm, ArmorType::Rha, Vec3::Y)
     } else {
-        ("Turret Underside", 25.0, ArmorType::Cha, Vec3::NEG_Y)
+        ("Turret Underside", (profile.turret_roof_mm * 1.1).max(16.0), atype, Vec3::NEG_Y)
     }
 }
 
@@ -892,12 +1011,14 @@ pub fn raycast_tank_armor(
     include_external: bool,
     turret_attached: bool,
 ) -> Option<ArmorHit> {
+    let profile = &tank.config.armor;
+
     // Broad phase bounding sphere
     let center = tank.position + Vec3::new(0.0, 1.35, 0.0);
     let to_c = center - origin;
     let along = to_c.dot(dir).clamp(0.0, max_dist);
     let closest = origin + dir * along;
-    if closest.distance_squared(center) > 5.8 * 5.8 {
+    if closest.distance_squared(center) > 6.4 * 6.4 {
         return None;
     }
 
@@ -908,8 +1029,9 @@ pub fn raycast_tank_armor(
         }
     };
 
-    // 1. Main armored hull body
+    // 1. Main armored hull body (taller bounding box for casemate tank destroyers)
     let (h_pos, h_rot) = PartFrame::Hull.world_pose(tank);
+    let hull_top = if profile.is_casemate { 2.25 } else { 1.42 };
     if let Some((t, lhit, lnorm)) = ray_vs_oriented_box(
         origin,
         dir,
@@ -917,9 +1039,10 @@ pub fn raycast_tank_armor(
         h_pos,
         h_rot,
         Vec3::new(-1.08, 0.24, -2.60),
-        Vec3::new(1.08, 1.42, 2.60),
+        Vec3::new(1.08, hull_top, 2.60),
     ) {
-        let (plate_name, nominal_mm, armor_type, plate_lnorm) = classify_hull_plate(lhit, lnorm);
+        let (plate_name, nominal_mm, armor_type, plate_lnorm) =
+            classify_hull_plate(profile, lhit, lnorm);
         consider(ArmorHit {
             distance: t,
             world_point: origin + dir * t,
@@ -968,55 +1091,57 @@ pub fn raycast_tank_armor(
         }
     }
 
-    // 3. Turret main body, commander cupola, and external gun barrel (skipped if turret blew off)
+    // 3. Turret main body, commander cupola, and external gun barrel
     if turret_attached {
-        let (t_pos, t_rot) = PartFrame::Turret.world_pose(tank);
-        if let Some((t, lhit, lnorm)) = ray_vs_oriented_box(
-            origin,
-            dir,
-            max_dist,
-            t_pos,
-            t_rot,
-            Vec3::new(-1.0, 0.0, -1.25),
-            Vec3::new(1.0, 1.0, 1.35),
-        ) {
-            let (plate_name, nominal_mm, armor_type, plate_lnorm) =
-                classify_turret_plate(lhit, lnorm);
-            consider(ArmorHit {
-                distance: t,
-                world_point: origin + dir * t,
-                plate_normal_world: (t_rot * plate_lnorm).normalize(),
-                geom_normal_world: (t_rot * lnorm).normalize(),
-                plate_name,
-                nominal_mm,
-                armor_type,
-                external_module: None,
-                frame: PartFrame::Turret,
-            });
-        }
+        if !profile.is_casemate {
+            let (t_pos, t_rot) = PartFrame::Turret.world_pose(tank);
+            if let Some((t, lhit, lnorm)) = ray_vs_oriented_box(
+                origin,
+                dir,
+                max_dist,
+                t_pos,
+                t_rot,
+                Vec3::new(-1.0, 0.0, -1.25),
+                Vec3::new(1.0, 1.0, 1.35),
+            ) {
+                let (plate_name, nominal_mm, armor_type, plate_lnorm) =
+                    classify_turret_plate(profile, lhit, lnorm);
+                consider(ArmorHit {
+                    distance: t,
+                    world_point: origin + dir * t,
+                    plate_normal_world: (t_rot * plate_lnorm).normalize(),
+                    geom_normal_world: (t_rot * lnorm).normalize(),
+                    plate_name,
+                    nominal_mm,
+                    armor_type,
+                    external_module: None,
+                    frame: PartFrame::Turret,
+                });
+            }
 
-        // Commander cupola
-        if let Some((t, _, lnorm)) = ray_vs_oriented_box(
-            origin,
-            dir,
-            max_dist,
-            t_pos,
-            t_rot,
-            Vec3::new(-0.56, 1.0, -0.05),
-            Vec3::new(0.04, 1.24, 0.55),
-        ) {
-            let wn = (t_rot * lnorm).normalize();
-            consider(ArmorHit {
-                distance: t,
-                world_point: origin + dir * t,
-                plate_normal_world: wn,
-                geom_normal_world: wn,
-                plate_name: "Cupola",
-                nominal_mm: 45.0,
-                armor_type: ArmorType::Cha,
-                external_module: None,
-                frame: PartFrame::Turret,
-            });
+            // Commander cupola
+            if let Some((t, _, lnorm)) = ray_vs_oriented_box(
+                origin,
+                dir,
+                max_dist,
+                t_pos,
+                t_rot,
+                Vec3::new(-0.56, 1.0, -0.05),
+                Vec3::new(0.04, 1.24, 0.55),
+            ) {
+                let wn = (t_rot * lnorm).normalize();
+                consider(ArmorHit {
+                    distance: t,
+                    world_point: origin + dir * t,
+                    plate_normal_world: wn,
+                    geom_normal_world: wn,
+                    plate_name: "Cupola",
+                    nominal_mm: (profile.turret_side_mm * 0.85).clamp(20.0, 90.0),
+                    armor_type: profile.turret_armor_type,
+                    external_module: None,
+                    frame: PartFrame::Turret,
+                });
+            }
         }
 
         // External gun barrel

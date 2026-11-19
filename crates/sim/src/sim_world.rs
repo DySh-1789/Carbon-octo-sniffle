@@ -9,6 +9,7 @@ use crate::battle::{
     BattleMode, BattleState, KILL_TICKET_PENALTY, KillEvent, MAX_TANKS, SimRng, TankId, TankUnit,
     Team, VISION_RANGE, raycast_tanks, raycast_tanks_armor, resolve_tank_collisions,
 };
+use crate::catalog::VehicleCatalog;
 use crate::damage::{ArmorHit, HitOutcome, HitReport, KillReason, resolve_ap_impact};
 use crate::map_gen::{MapMetadata, default_metadata_for_world};
 use crate::tank::{FiredShot, TankConfig, TankInput, TankState};
@@ -43,6 +44,9 @@ pub struct SimWorld {
     pub recent_kills: Vec<KillEvent>,
     pub tick: u64,
     base_config: TankConfig,
+    /// Optional per-slot vehicle configurations for Stage 5 multi-vehicle tier battles.
+    allies_lineup: Vec<TankConfig>,
+    axis_lineup: Vec<TankConfig>,
     team_size: usize,
     next_projectile_id: u64,
     rng: SimRng,
@@ -72,6 +76,81 @@ impl SimWorld {
         Self::build(voxels, map, tank_config, BattleMode::TeamBattle, per_team)
     }
 
+    /// Creates a Stage 5 tier-matched `per_team` vs `per_team` battle with the player driving
+    /// `player_vehicle_id` and bots driving balanced vehicles of the exact same tier across all
+    /// three nations (USA, Germany, USSR).
+    pub fn new_tier_battle(
+        voxels: VoxelWorld,
+        map: MapMetadata,
+        catalog: &VehicleCatalog,
+        player_vehicle_id: &str,
+        per_team: usize,
+    ) -> Self {
+        let player_spec = catalog
+            .by_id(player_vehicle_id)
+            .unwrap_or_else(|| catalog.default_vehicle());
+        let player_cfg = player_spec.to_tank_config(&player_spec.build_models());
+        let per_team = per_team.clamp(1, MAX_TANKS / 2);
+        let mut sim = Self::build(voxels, map, player_cfg, BattleMode::TeamBattle, per_team);
+        sim.configure_tier_battle(catalog, &player_spec.id, per_team);
+        sim
+    }
+
+    /// Reconfigures this simulation in place for a new player vehicle and tier-matched team battle,
+    /// reusing the existing `VoxelWorld`, `MapMetadata`, and `NavGrid` with zero world regeneration.
+    pub fn configure_tier_battle(
+        &mut self,
+        catalog: &VehicleCatalog,
+        player_vehicle_id: &str,
+        per_team: usize,
+    ) {
+        let per_team = per_team.clamp(1, MAX_TANKS / 2);
+        let player_spec = catalog
+            .by_id(player_vehicle_id)
+            .unwrap_or_else(|| catalog.default_vehicle());
+        let tier_specs = catalog.by_tier(player_spec.tier);
+
+        // Build each distinct tier vehicle's TankConfig once (3 vehicles per tier = tiny CPU/RAM)
+        let mut tier_configs: Vec<TankConfig> = tier_specs
+            .iter()
+            .map(|spec| spec.to_tank_config(&spec.build_models()))
+            .collect();
+        if tier_configs.is_empty() {
+            tier_configs.push(player_spec.to_tank_config(&player_spec.build_models()));
+        }
+
+        let player_pos = tier_configs
+            .iter()
+            .position(|c| c.vehicle_id == player_spec.id)
+            .unwrap_or(0);
+        let player_cfg = tier_configs[player_pos].clone();
+
+        // Rotate enemy lineup so non-player nations appear first while still showcasing all 3 nations
+        let n_tier = tier_configs.len();
+        let mut allies = Vec::with_capacity(per_team);
+        let mut axis = Vec::with_capacity(per_team);
+        for slot in 0..per_team {
+            if slot == 0 {
+                allies.push(player_cfg.clone());
+            } else {
+                let idx = (player_pos + slot) % n_tier;
+                allies.push(tier_configs[idx].clone());
+            }
+            let enemy_idx = (player_pos + 1 + slot) % n_tier;
+            axis.push(tier_configs[enemy_idx].clone());
+        }
+
+        self.base_config = player_cfg;
+        self.allies_lineup = allies;
+        self.axis_lineup = axis;
+        self.team_size = per_team;
+        self.battle.mode = BattleMode::TeamBattle;
+        if self.nav.is_none() {
+            self.nav = Some(NavGrid::build(&self.voxels));
+        }
+        self.restart_battle();
+    }
+
     fn build(
         voxels: VoxelWorld,
         map: MapMetadata,
@@ -96,6 +175,8 @@ impl SimWorld {
             recent_kills: Vec::new(),
             tick: 0,
             base_config: tank_config,
+            allies_lineup: Vec::new(),
+            axis_lineup: Vec::new(),
             team_size,
             next_projectile_id: 1,
             rng: SimRng::new(0x5EED_CA4B_0A57_u64),
@@ -136,6 +217,18 @@ impl SimWorld {
         Vec3::new(x, y, base.z)
     }
 
+    fn config_for_slot(&self, team: Team, slot: usize) -> TankConfig {
+        let lineup = match team {
+            Team::Allies => &self.allies_lineup,
+            Team::Axis => &self.axis_lineup,
+        };
+        if let Some(cfg) = lineup.get(slot) {
+            cfg.clone()
+        } else {
+            self.base_config.clone()
+        }
+    }
+
     fn spawn_tanks(&mut self) {
         self.tanks.clear();
         self.brains.clear();
@@ -152,13 +245,22 @@ impl SimWorld {
                 let is_player = team == Team::Allies && slot == 0;
                 let yaw = if team == Team::Allies { 0.0 } else { PI };
                 let pos = self.spawn_point(team, slot);
-                let mut state = TankState::new(self.base_config.clone(), pos, yaw);
+                let cfg = self.config_for_slot(team, slot);
+                let vehicle_label = cfg.name.clone();
+                let mut state = TankState::new(cfg, pos, yaw);
                 state.settle_on_terrain(&self.voxels);
-                let name = match team {
+                let callsign = match team {
                     Team::Allies => ALLIES_CALLSIGNS[slot % ALLIES_CALLSIGNS.len()],
                     Team::Axis => AXIS_CALLSIGNS[slot % AXIS_CALLSIGNS.len()],
                 };
-                let unit = TankUnit::new(id, name, team, is_player, state);
+                let display_name = if self.allies_lineup.is_empty() {
+                    callsign.to_string()
+                } else if is_player {
+                    format!("Player ({vehicle_label})")
+                } else {
+                    format!("{callsign} ({vehicle_label})")
+                };
+                let unit = TankUnit::new(id, &display_name, team, is_player, state);
                 let brain = (!is_player).then(|| {
                     let objective = if zone_count >= 3 {
                         let lane = if pos.x < -10.0 {

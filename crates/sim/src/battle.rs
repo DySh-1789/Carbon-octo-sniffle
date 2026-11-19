@@ -94,6 +94,7 @@ pub struct TankUnit {
 
 impl TankUnit {
     pub fn new(id: TankId, name: &str, team: Team, is_player: bool, state: TankState) -> Self {
+        let damage = TankDamageState::from_profile(&state.config.armor);
         Self {
             id,
             name: name.to_string(),
@@ -101,7 +102,7 @@ impl TankUnit {
             is_player,
             state,
             alive: true,
-            damage: TankDamageState::basic_medium_tank(),
+            damage,
             kills: 0,
             hits_landed: 0,
             spotted: false,

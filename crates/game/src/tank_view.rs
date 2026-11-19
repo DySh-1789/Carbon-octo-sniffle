@@ -1,21 +1,26 @@
+use std::collections::HashMap;
+
 use bevy::prelude::*;
-use sim::{GRAVITY, TankId, Team};
-use voxel::{TankVoxelModels, mesh_voxel_model};
+use sim::{GRAVITY, Nation, TankId};
+use voxel::mesh_voxel_model;
 
 use crate::bridge::{PendingSimEvents, SimResource, to_bevy_quat, to_bevy_vec3};
+use crate::state::{AppState, BattleEntity, CatalogResource, TankPaintMaterials};
 use crate::voxel_render::voxel_mesh_to_bevy;
 
-#[derive(Resource)]
-pub struct TankModelsResource(pub TankVoxelModels);
-
-#[derive(Resource)]
-struct TankRenderAssets {
-    allies_mat: Handle<StandardMaterial>,
-    axis_mat: Handle<StandardMaterial>,
-    wreck_mat: Handle<StandardMaterial>,
+/// Cached GPU meshes & mount offsets for one distinct vehicle type participating in the battle.
+struct VehicleMeshSet {
+    hull_mesh: Handle<Mesh>,
     turret_mesh: Handle<Mesh>,
     barrel_mesh: Handle<Mesh>,
+    turret_mount_offset: Vec3,
     gun_mount_offset: Vec3,
+}
+
+#[derive(Resource, Default)]
+struct TankRenderState {
+    /// Cached per `vehicle_id` (only 3 distinct vehicles in any tier-matched battle = <300 KiB GPU).
+    vehicle_meshes: HashMap<String, VehicleMeshSet>,
     alive_cache: Vec<bool>,
     turret_popped_cache: Vec<bool>,
 }
@@ -37,7 +42,8 @@ struct TankVisualPart {
 #[derive(Component, Copy, Clone)]
 struct TankMaterialSlot {
     id: TankId,
-    team: Team,
+    nation: Nation,
+    tier: u8,
 }
 
 /// Ballistic blown-off turret launched into the air on ammo-rack detonation.
@@ -52,7 +58,9 @@ pub struct TankViewPlugin;
 
 impl Plugin for TankViewPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_battle_tanks)
+        app.init_resource::<TankRenderState>()
+            .add_systems(OnEnter(AppState::InBattle), spawn_battle_tanks)
+            .add_systems(OnExit(AppState::InBattle), clear_tank_render_state)
             .add_systems(
                 Update,
                 (
@@ -60,11 +68,13 @@ impl Plugin for TankViewPlugin {
                     sync_turret_blow_offs,
                     step_detached_turrets,
                 )
-                    .chain(),
+                    .chain()
+                    .run_if(in_state(AppState::InBattle)),
             )
             .add_systems(
                 PostUpdate,
-                (sync_all_tank_transforms, sync_tank_wreck_materials),
+                (sync_all_tank_transforms, sync_tank_wreck_materials)
+                    .run_if(in_state(AppState::InBattle)),
             );
     }
 }
@@ -72,64 +82,74 @@ impl Plugin for TankViewPlugin {
 fn spawn_battle_tanks(
     mut commands: Commands,
     sim: Res<SimResource>,
-    models: Res<TankModelsResource>,
+    catalog: Res<CatalogResource>,
+    paints: Res<TankPaintMaterials>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut render_state: ResMut<TankRenderState>,
 ) {
-    // Share ONLY 3 GPU meshes and 3 PBR materials across all 12 battle tanks + blown-off turrets
-    let allies_mat = materials.add(StandardMaterial {
-        base_color: Color::WHITE,
-        perceptual_roughness: 0.62,
-        metallic: 0.28,
-        reflectance: 0.35,
-        ..default()
-    });
-    let axis_mat = materials.add(StandardMaterial {
-        base_color: Color::linear_rgb(1.65, 1.15, 0.78),
-        perceptual_roughness: 0.64,
-        metallic: 0.28,
-        reflectance: 0.35,
-        ..default()
-    });
-    let wreck_mat = materials.add(StandardMaterial {
-        base_color: Color::linear_rgb(0.20, 0.19, 0.19),
-        perceptual_roughness: 0.94,
-        metallic: 0.12,
-        reflectance: 0.15,
-        ..default()
-    });
+    render_state.vehicle_meshes.clear();
+    render_state.alive_cache.clear();
+    render_state.turret_popped_cache.clear();
 
-    let hull_mesh = meshes.add(voxel_mesh_to_bevy(mesh_voxel_model(
-        &models.0.hull,
-        &sim.0.voxels.materials,
-    )));
-    let turret_mesh = meshes.add(voxel_mesh_to_bevy(mesh_voxel_model(
-        &models.0.turret,
-        &sim.0.voxels.materials,
-    )));
-    let barrel_mesh = meshes.add(voxel_mesh_to_bevy(mesh_voxel_model(
-        &models.0.barrel,
-        &sim.0.voxels.materials,
-    )));
-
-    let mut alive_cache = Vec::with_capacity(sim.0.tanks.len());
-    let mut turret_popped_cache = Vec::with_capacity(sim.0.tanks.len());
+    // Build & cache GPU meshes ONCE per distinct vehicle_id in the battle
     for unit in &sim.0.tanks {
-        alive_cache.push(unit.alive);
-        turret_popped_cache.push(unit.damage.turret_blown_off);
-        let mat = match (unit.alive, unit.team) {
-            (false, _) => wreck_mat.clone(),
-            (true, Team::Allies) => allies_mat.clone(),
-            (true, Team::Axis) => axis_mat.clone(),
+        let vid = &unit.state.config.vehicle_id;
+        if render_state.vehicle_meshes.contains_key(vid) {
+            continue;
+        }
+        let models = catalog
+            .0
+            .by_id(vid)
+            .map(|s| s.build_models())
+            .unwrap_or_else(voxel::build_basic_tank_models);
+        let hull_mesh = meshes.add(voxel_mesh_to_bevy(mesh_voxel_model(
+            &models.hull,
+            &sim.0.voxels.materials,
+        )));
+        let turret_mesh = meshes.add(voxel_mesh_to_bevy(mesh_voxel_model(
+            &models.turret,
+            &sim.0.voxels.materials,
+        )));
+        let barrel_mesh = meshes.add(voxel_mesh_to_bevy(mesh_voxel_model(
+            &models.barrel,
+            &sim.0.voxels.materials,
+        )));
+        render_state.vehicle_meshes.insert(
+            vid.clone(),
+            VehicleMeshSet {
+                hull_mesh,
+                turret_mesh,
+                barrel_mesh,
+                turret_mount_offset: to_bevy_vec3(models.turret_mount_offset),
+                gun_mount_offset: to_bevy_vec3(models.gun_mount_offset),
+            },
+        );
+    }
+
+    for unit in &sim.0.tanks {
+        render_state.alive_cache.push(unit.alive);
+        render_state
+            .turret_popped_cache
+            .push(unit.damage.turret_blown_off);
+
+        let tank = &unit.state;
+        let Some(vmesh) = render_state.vehicle_meshes.get(&tank.config.vehicle_id) else {
+            continue;
+        };
+        let mat = if unit.alive {
+            paints.material_for(tank.config.nation, tank.config.tier)
+        } else {
+            paints.wreck_charred.clone()
         };
         let slot = TankMaterialSlot {
             id: unit.id,
-            team: unit.team,
+            nation: tank.config.nation,
+            tier: tank.config.tier,
         };
-        let tank = &unit.state;
 
         commands
             .spawn((
+                BattleEntity,
                 TankVisualPart {
                     id: unit.id,
                     kind: TankPartKind::HullRoot,
@@ -140,7 +160,7 @@ fn spawn_battle_tanks(
             ))
             .with_children(|hull| {
                 hull.spawn((
-                    Mesh3d(hull_mesh.clone()),
+                    Mesh3d(vmesh.hull_mesh.clone()),
                     MeshMaterial3d(mat.clone()),
                     slot,
                     Transform::IDENTITY,
@@ -151,13 +171,13 @@ fn spawn_battle_tanks(
                         id: unit.id,
                         kind: TankPartKind::TurretPivot,
                     },
-                    Transform::from_translation(to_bevy_vec3(models.0.turret_mount_offset))
+                    Transform::from_translation(vmesh.turret_mount_offset)
                         .with_rotation(Quat::from_rotation_y(tank.turret_yaw_local)),
                     Visibility::default(),
                 ))
                 .with_children(|turret| {
                     turret.spawn((
-                        Mesh3d(turret_mesh.clone()),
+                        Mesh3d(vmesh.turret_mesh.clone()),
                         MeshMaterial3d(mat.clone()),
                         slot,
                         Transform::IDENTITY,
@@ -169,7 +189,7 @@ fn spawn_battle_tanks(
                                 id: unit.id,
                                 kind: TankPartKind::GunPivot,
                             },
-                            Transform::from_translation(to_bevy_vec3(models.0.gun_mount_offset))
+                            Transform::from_translation(vmesh.gun_mount_offset)
                                 .with_rotation(Quat::from_rotation_x(tank.gun_pitch_local)),
                             Visibility::default(),
                         ))
@@ -179,7 +199,7 @@ fn spawn_battle_tanks(
                                     id: unit.id,
                                     kind: TankPartKind::BarrelMesh,
                                 },
-                                Mesh3d(barrel_mesh.clone()),
+                                Mesh3d(vmesh.barrel_mesh.clone()),
                                 MeshMaterial3d(mat.clone()),
                                 slot,
                                 Transform::from_xyz(0.0, 0.0, tank.recoil_offset),
@@ -188,23 +208,18 @@ fn spawn_battle_tanks(
                 });
             });
     }
+}
 
-    commands.insert_resource(TankRenderAssets {
-        allies_mat,
-        axis_mat,
-        wreck_mat,
-        turret_mesh,
-        barrel_mesh,
-        gun_mount_offset: to_bevy_vec3(models.0.gun_mount_offset),
-        alive_cache,
-        turret_popped_cache,
-    });
+fn clear_tank_render_state(mut render_state: ResMut<TankRenderState>) {
+    render_state.vehicle_meshes.clear();
+    render_state.alive_cache.clear();
+    render_state.turret_popped_cache.clear();
 }
 
 fn clear_detached_turrets_on_restart(
     mut commands: Commands,
     pending: Res<PendingSimEvents>,
-    mut assets: ResMut<TankRenderAssets>,
+    mut render_state: ResMut<TankRenderState>,
     detached_q: Query<Entity, With<DetachedTurret>>,
     mut parts_q: Query<(&TankVisualPart, &mut Visibility)>,
 ) {
@@ -214,7 +229,7 @@ fn clear_detached_turrets_on_restart(
     for entity in &detached_q {
         commands.entity(entity).despawn();
     }
-    assets.turret_popped_cache.fill(false);
+    render_state.turret_popped_cache.fill(false);
     for (part, mut vis) in &mut parts_q {
         if part.kind == TankPartKind::TurretPivot {
             *vis = Visibility::Inherited;
@@ -225,16 +240,21 @@ fn clear_detached_turrets_on_restart(
 fn sync_turret_blow_offs(
     mut commands: Commands,
     sim: Res<SimResource>,
-    mut assets: ResMut<TankRenderAssets>,
+    paints: Res<TankPaintMaterials>,
+    mut render_state: ResMut<TankRenderState>,
     mut parts_q: Query<(&TankVisualPart, &mut Visibility)>,
 ) {
     for (i, unit) in sim.0.tanks.iter().enumerate() {
         let popped = unit.damage.turret_blown_off;
-        let was_popped = assets.turret_popped_cache.get(i).copied().unwrap_or(false);
+        let was_popped = render_state
+            .turret_popped_cache
+            .get(i)
+            .copied()
+            .unwrap_or(false);
         if popped == was_popped {
             continue;
         }
-        if let Some(entry) = assets.turret_popped_cache.get_mut(i) {
+        if let Some(entry) = render_state.turret_popped_cache.get_mut(i) {
             *entry = popped;
         }
 
@@ -248,15 +268,24 @@ fn sync_turret_blow_offs(
             }
         }
 
-        if popped {
+        if popped
+            && let Some(vmesh) = render_state
+                .vehicle_meshes
+                .get(&unit.state.config.vehicle_id)
+        {
             let turret_pos = to_bevy_vec3(unit.state.turret_world_position()) + Vec3::Y * 0.25;
             let turret_rot = to_bevy_quat(unit.state.turret_world_rotation());
             let seed = (unit.id.0 as f32) * 1.73 + (sim.0.tick as f32) * 0.13;
-            let vel = Vec3::new(seed.cos() * 3.4, 9.8 + (seed.sin().abs() * 2.8), seed.sin() * 3.4);
+            let vel = Vec3::new(
+                seed.cos() * 3.4,
+                9.8 + (seed.sin().abs() * 2.8),
+                seed.sin() * 3.4,
+            );
             let ang = Vec3::new(2.8, 1.9 * seed.cos().signum(), -2.4);
 
             commands
                 .spawn((
+                    BattleEntity,
                     DetachedTurret {
                         velocity: vel,
                         angular_vel: ang,
@@ -267,14 +296,14 @@ fn sync_turret_blow_offs(
                 ))
                 .with_children(|t| {
                     t.spawn((
-                        Mesh3d(assets.turret_mesh.clone()),
-                        MeshMaterial3d(assets.wreck_mat.clone()),
+                        Mesh3d(vmesh.turret_mesh.clone()),
+                        MeshMaterial3d(paints.wreck_charred.clone()),
                         Transform::IDENTITY,
                     ));
                     t.spawn((
-                        Mesh3d(assets.barrel_mesh.clone()),
-                        MeshMaterial3d(assets.wreck_mat.clone()),
-                        Transform::from_translation(assets.gun_mount_offset)
+                        Mesh3d(vmesh.barrel_mesh.clone()),
+                        MeshMaterial3d(paints.wreck_charred.clone()),
+                        Transform::from_translation(vmesh.gun_mount_offset)
                             .with_rotation(Quat::from_rotation_x(unit.state.gun_pitch_local)),
                     ));
                 });
@@ -355,14 +384,15 @@ fn sync_all_tank_transforms(
 
 fn sync_tank_wreck_materials(
     sim: Res<SimResource>,
-    mut assets: ResMut<TankRenderAssets>,
+    paints: Res<TankPaintMaterials>,
+    mut render_state: ResMut<TankRenderState>,
     mut slots: Query<(&TankMaterialSlot, &mut MeshMaterial3d<StandardMaterial>)>,
 ) {
     let mut changed = false;
     for (i, unit) in sim.0.tanks.iter().enumerate() {
-        if assets.alive_cache.get(i).copied() != Some(unit.alive) {
+        if render_state.alive_cache.get(i).copied() != Some(unit.alive) {
             changed = true;
-            if let Some(entry) = assets.alive_cache.get_mut(i) {
+            if let Some(entry) = render_state.alive_cache.get_mut(i) {
                 *entry = unit.alive;
             }
         }
@@ -374,11 +404,9 @@ fn sync_tank_wreck_materials(
     for (slot, mut mat) in &mut slots {
         let alive = sim.0.tanks.get(slot.id.index()).is_some_and(|u| u.alive);
         mat.0 = if !alive {
-            assets.wreck_mat.clone()
-        } else if slot.team == Team::Allies {
-            assets.allies_mat.clone()
+            paints.wreck_charred.clone()
         } else {
-            assets.axis_mat.clone()
+            paints.material_for(slot.nation, slot.tier)
         };
     }
 }

@@ -631,7 +631,19 @@ impl BotBrain {
                     BotMode::Hold
                 };
                 throttle = 0.0;
-                steer = 0.0;
+                if target_visible && let Some(lim) = st.config.turret_yaw_limit {
+                    let dx = aim_point.x - pos.x;
+                    let dz = aim_point.z - pos.z;
+                    let desired_yaw = (-dx).atan2(-dz);
+                    let yaw_err = wrap_angle(desired_yaw - st.hull_yaw);
+                    steer = if yaw_err.abs() > lim * 0.70 {
+                        (yaw_err * 3.0).clamp(-1.0, 1.0)
+                    } else {
+                        0.0
+                    };
+                } else {
+                    steer = 0.0;
+                }
             } else {
                 self.mode = if target_visible {
                     BotMode::Engage

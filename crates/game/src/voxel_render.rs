@@ -7,8 +7,9 @@ use voxel::glam::IVec3;
 use voxel::{VoxelMeshData, mesh_world_chunk};
 
 use crate::bridge::{SimResource, to_bevy_vec3};
+use crate::state::{AppState, BattleEntity};
 
-/// Number of chunks nearest to spawn meshed immediately on startup so the visible area is solid on Frame 1.
+/// Number of chunks nearest to spawn meshed immediately on battle entry so the visible area is solid on Frame 1.
 const INITIAL_NEAR_CHUNKS: usize = 36;
 
 /// Max dirty chunks meshed per frame during streaming & runtime updates.
@@ -56,8 +57,13 @@ pub struct VoxelRenderPlugin;
 impl Plugin for VoxelRenderPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ChunkMeshEntities>()
-            .add_systems(Startup, (setup_world_material, build_initial_world_chunks).chain())
-            .add_systems(Update, sync_dirty_world_chunks);
+            .add_systems(Startup, setup_world_material)
+            .add_systems(OnEnter(AppState::InBattle), build_initial_world_chunks)
+            .add_systems(
+                Update,
+                sync_dirty_world_chunks.run_if(in_state(AppState::InBattle)),
+            )
+            .add_systems(OnExit(AppState::InBattle), clear_chunk_registry);
     }
 }
 
@@ -79,12 +85,19 @@ fn build_initial_world_chunks(
     material: Res<WorldVoxelMaterial>,
     mut registry: ResMut<ChunkMeshEntities>,
 ) {
+    registry.map.clear();
+    sim.0.voxels.mark_all_dirty();
     let focus = sim.0.player_tank().position;
     let dirty = sim
         .0
         .voxels
         .take_dirty_chunks_nearest(focus, INITIAL_NEAR_CHUNKS);
     rebuild_chunks(&mut commands, &sim.0, &mut meshes, &material.0, &mut registry, &dirty);
+}
+
+fn clear_chunk_registry(mut registry: ResMut<ChunkMeshEntities>) {
+    // Entities themselves are despawned by the centralized `despawn_tagged::<BattleEntity>` cleanup.
+    registry.map.clear();
 }
 
 fn sync_dirty_world_chunks(
@@ -126,6 +139,7 @@ fn rebuild_chunks(
         let origin = to_bevy_vec3(sim.voxels.chunk_world_origin(coord));
         let entity = commands
             .spawn((
+                BattleEntity,
                 VoxelChunkMesh { coord },
                 Mesh3d(mesh_handle),
                 MeshMaterial3d(material.clone()),

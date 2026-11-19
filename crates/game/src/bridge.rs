@@ -47,10 +47,11 @@ impl PlayerInputResource {
     }
 }
 
-/// Battle lifecycle control signals bridged from UI/keyboard into `FixedUpdate`.
+/// Battle lifecycle control signals bridged from UI/keyboard into `FixedUpdate` / state machine.
 #[derive(Resource, Default)]
 pub struct BattleControlResource {
     pub restart_requested: bool,
+    pub return_to_hangar: bool,
 }
 
 /// Buffered frame events bridged from `FixedUpdate` to render-frame VFX/HUD systems.

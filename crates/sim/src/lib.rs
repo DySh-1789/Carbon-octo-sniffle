@@ -1,6 +1,7 @@
 pub mod ai;
 pub mod ballistics;
 pub mod battle;
+pub mod catalog;
 pub mod damage;
 pub mod map_gen;
 pub mod shell;
@@ -15,10 +16,11 @@ pub use battle::{
     TankUnit, Team, VISION_RANGE, ZONE_BLEED_PER_SEC, ray_vs_tank, raycast_tanks,
     raycast_tanks_armor, resolve_tank_collisions,
 };
+pub use catalog::{Nation, VehicleCatalog, VehicleClass, VehicleSpec, tier_roman};
 pub use damage::{
-    ArmorHit, ArmorType, CREW_TRANSFER_TIME, CrewMemberState, CrewRole, DamageModifiers,
-    FIRE_BURNOUT_TIME, HitOutcome, HitReport, KillReason, MIN_OPERATIONAL_CREW, ModuleHealth,
-    ModuleKind, ModuleState, NO_LOADER_RELOAD_MULT, PartFrame, TankDamageState,
+    ArmorHit, ArmorProfile, ArmorType, CREW_TRANSFER_TIME, CrewMemberState, CrewRole,
+    DamageModifiers, FIRE_BURNOUT_TIME, HitOutcome, HitReport, KillReason, MIN_OPERATIONAL_CREW,
+    ModuleHealth, ModuleKind, ModuleState, NO_LOADER_RELOAD_MULT, PartFrame, TankDamageState,
     raycast_tank_armor, resolve_ap_impact,
 };
 pub use map_gen::{
@@ -901,5 +903,187 @@ mod tests {
             .unwrap()
             .apply_damage(200.0);
         assert!(!dmg_mods.can_move());
+    }
+
+    #[test]
+    fn stage5_catalog_has_24_approved_vehicles_and_all_voxel_models_mesh_cleanly() {
+        let catalog = VehicleCatalog::stage5_catalog();
+        assert_eq!(catalog.all().len(), 24);
+
+        // Verify 3 nations × 8 tiers (1..=8) with unique IDs
+        let mut ids = std::collections::HashSet::new();
+        for nation in Nation::ALL {
+            let list = catalog.by_nation(nation);
+            assert_eq!(list.len(), 8, "nation {:?} must have 8 tiers", nation);
+            for (idx, spec) in list.iter().enumerate() {
+                assert_eq!(spec.tier as usize, idx + 1);
+                assert!(ids.insert(spec.id.clone()), "duplicate id {}", spec.id);
+            }
+        }
+
+        // Verify user-requested roster replacements: M4A3E2 (76) W (USA VI) & T-44-100 (USSR VII)
+        let jumbo = catalog.by_id("us_m4a3e2_76").expect("M4A3E2 (76) W must exist");
+        assert_eq!(jumbo.nation, Nation::Usa);
+        assert_eq!(jumbo.tier, 6);
+        assert!(jumbo.armor.ufp_mm >= 100.0);
+        assert!(jumbo.armor.turret_mantlet_mm >= 170.0);
+
+        let t44 = catalog.by_id("su_t44_100").expect("T-44-100 must exist");
+        assert_eq!(t44.nation, Nation::Ussr);
+        assert_eq!(t44.tier, 7);
+        assert!(t44.shell.caliber_mm >= 100.0);
+        assert!(t44.shell.penetration_0m_mm >= 200.0);
+
+        // Every single vehicle's voxel blueprint must build non-empty U16 meshes
+        let materials = voxel::MaterialRegistry::default();
+        for spec in catalog.all() {
+            let models = spec.build_models();
+            let hull_mesh = voxel::mesh_voxel_model(&models.hull, &materials);
+            let turret_mesh = voxel::mesh_voxel_model(&models.turret, &materials);
+            let barrel_mesh = voxel::mesh_voxel_model(&models.barrel, &materials);
+            assert!(!hull_mesh.is_empty(), "{} hull mesh empty", spec.id);
+            assert!(!turret_mesh.is_empty(), "{} turret mesh empty", spec.id);
+            assert!(!barrel_mesh.is_empty(), "{} barrel mesh empty", spec.id);
+            assert!(hull_mesh.positions.len() < u16::MAX as usize);
+            assert!(turret_mesh.positions.len() < u16::MAX as usize);
+            assert!(barrel_mesh.positions.len() < u16::MAX as usize);
+            let cfg = spec.to_tank_config(&models);
+            let dmg = TankDamageState::from_profile(&cfg.armor);
+            assert_eq!(dmg.total_crew_count(), spec.armor.crew_count as usize);
+        }
+    }
+
+    #[test]
+    fn casemate_tds_enforce_limited_traverse_arc() {
+        let catalog = VehicleCatalog::stage5_catalog();
+
+        for id in ["de_stug3g", "de_jagdtiger"] {
+            let voxels = generate_flat_proving_ground(96);
+            let spec = catalog.by_id(id).unwrap();
+            let models = spec.build_models();
+            let cfg = spec.to_tank_config(&models);
+            let limit = cfg.turret_yaw_limit.expect("casemate TD must have yaw limit");
+            assert!(limit > 0.10 && limit < 0.25);
+
+            let mut sim = SimWorld::new(voxels, cfg);
+            // Try aiming 90 degrees to the right (+X)
+            for _ in 0..180 {
+                sim.step_fixed(
+                    FIXED_DT,
+                    TankInput {
+                        aim_world_point: Vec3::new(100.0, 2.0, 0.0),
+                        ..Default::default()
+                    },
+                );
+            }
+            assert!(
+                sim.player_tank().turret_yaw_local.abs() <= limit + 1e-4,
+                "{id} turret_yaw_local {} exceeded casemate limit {limit}",
+                sim.player_tank().turret_yaw_local
+            );
+            assert!(
+                sim.player_tank().turret_yaw_local < -limit * 0.95,
+                "{id} should traverse cleanly up to right stop"
+            );
+        }
+    }
+
+    #[test]
+    fn jumbo_76_and_is3_pike_nose_deflect_weaker_frontal_ap_hits() {
+        let catalog = VehicleCatalog::stage5_catalog();
+        let tiger = catalog.by_id("de_tiger_h1").unwrap();
+        let jumbo = catalog.by_id("us_m4a3e2_76").unwrap();
+        let is3 = catalog.by_id("su_is3").unwrap();
+
+        // 1. Tiger H1 88mm KwK 36 AP (165mm @ 0m) striking M4A3E2 (76) Jumbo UFP at ~500m combat range
+        let jumbo_cfg = jumbo.to_tank_config(&jumbo.build_models());
+        let jumbo_tank = TankState::new(jumbo_cfg, Vec3::ZERO, 0.0);
+        let mut jumbo_dmg = TankDamageState::from_profile(&jumbo.armor);
+        let dir = Vec3::new(0.0, 0.0, 1.0);
+        let hit = raycast_tank_armor(&jumbo_tank, Vec3::new(0.0, 1.05, -10.0), dir, 20.0, false, true)
+            .expect("ray should hit Jumbo UFP");
+        assert_eq!(hit.plate_name, "Hull UFP");
+        let mut rng = SimRng::new(12);
+        let rep = resolve_ap_impact(
+            TankId(0),
+            Team::Axis,
+            TankId(1),
+            "Jumbo",
+            Team::Allies,
+            true,
+            &jumbo_tank,
+            &mut jumbo_dmg,
+            &tiger.shell,
+            hit,
+            dir,
+            tiger.shell.muzzle_velocity * 0.84,
+            &mut rng,
+        );
+        assert!(
+            matches!(rep.outcome, HitOutcome::NonPenetration | HitOutcome::Ricochet),
+            "Jumbo UFP (eff={:.1}mm) should stop Tiger 88mm at mid-range (pen={:.1}mm), got {:?}",
+            rep.effective_armor_mm,
+            rep.penetration_mm,
+            rep.outcome
+        );
+
+        // 2. IS-3 pike nose (110mm compound 56 deg + 25 deg wedge) defeats Tiger 88mm AP head-on
+        let is3_cfg = is3.to_tank_config(&is3.build_models());
+        let is3_tank = TankState::new(is3_cfg, Vec3::ZERO, 0.0);
+        let mut is3_dmg = TankDamageState::from_profile(&is3.armor);
+        let hit_is3 = raycast_tank_armor(&is3_tank, Vec3::new(0.45, 1.0, -10.0), dir, 20.0, false, true)
+            .expect("ray should hit IS-3 pike nose");
+        assert_eq!(hit_is3.plate_name, "Hull UFP");
+        let rep_is3 = resolve_ap_impact(
+            TankId(0),
+            Team::Axis,
+            TankId(1),
+            "IS-3",
+            Team::Allies,
+            true,
+            &is3_tank,
+            &mut is3_dmg,
+            &tiger.shell,
+            hit_is3,
+            dir,
+            tiger.shell.muzzle_velocity,
+            &mut rng,
+        );
+        assert!(
+            matches!(rep_is3.outcome, HitOutcome::NonPenetration | HitOutcome::Ricochet),
+            "IS-3 pike nose (angle={:.1}, eff={:.1}mm) should defeat Tiger 88mm (pen={:.1}mm), got {:?}",
+            rep_is3.impact_angle_deg,
+            rep_is3.effective_armor_mm,
+            rep_is3.penetration_mm,
+            rep_is3.outcome
+        );
+    }
+
+    #[test]
+    fn tier_matched_6v6_battle_spawns_all_three_nations_at_player_tier_and_switches_in_place() {
+        let catalog = VehicleCatalog::stage5_catalog();
+        let (world, meta) = generate_european_valley_map();
+        let mut sim = SimWorld::new_tier_battle(world, meta, &catalog, "us_m4a3e2_76", 6);
+
+        assert_eq!(sim.tanks.len(), 12);
+        assert_eq!(sim.player_tank().config.vehicle_id, "us_m4a3e2_76");
+        assert_eq!(sim.player_tank().config.tier, 6);
+        assert!(sim.tanks.iter().all(|t| t.state.config.tier == 6));
+
+        let nations_present: std::collections::HashSet<Nation> =
+            sim.tanks.iter().map(|t| t.state.config.nation).collect();
+        assert_eq!(nations_present.len(), 3, "tier 6 battle must include USA, Germany, and USSR");
+
+        // Switch in-place to Tier VII T-44-100 without regenerating world
+        sim.configure_tier_battle(&catalog, "su_t44_100", 6);
+        assert_eq!(sim.player_tank().config.vehicle_id, "su_t44_100");
+        assert_eq!(sim.player_tank().config.tier, 7);
+        assert!(sim.tanks.iter().all(|t| t.state.config.tier == 7));
+        assert_eq!(sim.tick, 0);
+
+        for _ in 0..180 {
+            sim.step_fixed(FIXED_DT, TankInput::default());
+        }
+        assert!(sim.tanks.iter().all(|t| t.state.position.is_finite()));
     }
 }

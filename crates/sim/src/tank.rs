@@ -4,13 +4,20 @@ use voxel::glam::{IVec3, Quat, Vec3};
 use voxel::{TankVoxelModels, VoxelWorld, raycast_world};
 
 use crate::battle::SimRng;
-use crate::damage::DamageModifiers;
+use crate::catalog::{Nation, VehicleClass};
+use crate::damage::{ArmorProfile, DamageModifiers};
 use crate::shell::ShellSpec;
 
 /// Static performance and geometry parameters for a tank.
 #[derive(Clone, Debug)]
 pub struct TankConfig {
+    /// Catalog identifier (e.g. `"us_m4a3e2_76"`, `"su_t44_100"`, or `"basic_medium"`).
+    pub vehicle_id: String,
     pub name: String,
+    pub nation: Nation,
+    /// Tech tree tier `1..=8`.
+    pub tier: u8,
+    pub class: VehicleClass,
     /// Maximum forward speed in m/s (~13.9 m/s ≈ 50 km/h).
     pub max_forward_speed: f32,
     /// Maximum reverse speed in m/s (~5.0 m/s ≈ 18 km/h).
@@ -25,6 +32,8 @@ pub struct TankConfig {
     pub hull_turn_rate: f32,
     /// Turret traverse rate in rad/s.
     pub turret_yaw_rate: f32,
+    /// Optional symmetric horizontal gun traverse limit in radians for casemate TDs (`None` = 360°).
+    pub turret_yaw_limit: Option<f32>,
     /// Gun elevation/depression rate in rad/s.
     pub gun_pitch_rate: f32,
     /// Minimum gun depression angle in radians (negative).
@@ -39,6 +48,8 @@ pub struct TankConfig {
     pub shell_drag: f32,
     /// Primary cannon shell specification (Stage 4: solid kinetic AP).
     pub shell: ShellSpec,
+    /// Historical plate thicknesses, slopes, armor types, and crew/transmission layout.
+    pub armor: ArmorProfile,
     /// Horizontal bounding half-extent used to keep hull inside playable arena.
     pub hull_radius: f32,
     /// Half-width of tank hull/tracks in meters for obstacle collision & suspension.
@@ -55,7 +66,11 @@ impl TankConfig {
     pub fn stage1_basic(models: &TankVoxelModels) -> Self {
         let shell = ShellSpec::basic_75mm_ap();
         Self {
+            vehicle_id: "basic_medium".to_string(),
             name: "Base Medium Tank".to_string(),
+            nation: Nation::Usa,
+            tier: 3,
+            class: VehicleClass::Medium,
             max_forward_speed: 13.9,
             max_reverse_speed: 5.0,
             acceleration: 5.2,
@@ -63,6 +78,7 @@ impl TankConfig {
             coast_drag: 2.8,
             hull_turn_rate: 1.15,
             turret_yaw_rate: 0.72,
+            turret_yaw_limit: None,
             gun_pitch_rate: 0.45,
             gun_min_pitch: (-8.0f32).to_radians(),
             gun_max_pitch: (20.0f32).to_radians(),
@@ -70,6 +86,7 @@ impl TankConfig {
             muzzle_velocity: shell.muzzle_velocity,
             shell_drag: shell.drag_coeff,
             shell,
+            armor: ArmorProfile::basic_medium_tank(),
             hull_radius: 3.2,
             hull_half_width: 1.55,
             hull_half_length: 2.65,
@@ -568,10 +585,18 @@ impl TankState {
         // Express aim vector in hull-local frame so turret rotates smoothly as hull turns
         let to_target_hull = self.hull_rotation().inverse() * to_target_world;
         let desired_yaw = (-to_target_hull.x).atan2(-to_target_hull.z);
-        let yaw_err = wrap_angle(desired_yaw - self.turret_yaw_local);
         let max_yaw_step = self.config.turret_yaw_rate * turret_rate_scale * dt;
-        self.turret_yaw_local =
-            wrap_angle(self.turret_yaw_local + yaw_err.clamp(-max_yaw_step, max_yaw_step));
+        if let Some(limit) = self.config.turret_yaw_limit {
+            let clamped_desired = desired_yaw.clamp(-limit, limit);
+            let yaw_err = clamped_desired - self.turret_yaw_local;
+            self.turret_yaw_local =
+                (self.turret_yaw_local + yaw_err.clamp(-max_yaw_step, max_yaw_step))
+                    .clamp(-limit, limit);
+        } else {
+            let yaw_err = wrap_angle(desired_yaw - self.turret_yaw_local);
+            self.turret_yaw_local =
+                wrap_angle(self.turret_yaw_local + yaw_err.clamp(-max_yaw_step, max_yaw_step));
+        }
 
         // Express aim vector in turret-local frame for gun elevation/depression
         let to_target_turret = self.turret_world_rotation().inverse() * to_target_world;

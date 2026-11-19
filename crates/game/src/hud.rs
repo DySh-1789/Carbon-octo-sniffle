@@ -4,10 +4,12 @@ use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::window::PrimaryWindow;
 use sim::{
     BattleOutcome, CrewRole, HitOutcome, MAX_TANKS, ModuleHealth, ModuleKind, START_TICKETS, Team,
+    tier_roman,
 };
 
 use crate::bridge::{BattleControlResource, PendingSimEvents, SimResource, to_bevy_vec3};
 use crate::camera::{CameraMode, MainTankCamera, TankCameraController};
+use crate::state::{AppState, BattleEntity};
 
 const MINIMAP_DISPLAY_PX: f32 = 192.0;
 const KILL_FEED_ROWS: usize = 5;
@@ -35,7 +37,13 @@ const HUD_MODULES: [ModuleKind; 9] = [
 ];
 
 #[derive(Component)]
-struct TelemetryText;
+struct TelemetryStripText;
+
+#[derive(Component)]
+struct AmmoSlotLabelText;
+
+#[derive(Component)]
+struct AmmoSlotStatusText;
 
 #[derive(Component)]
 struct ReloadFillBar;
@@ -48,6 +56,9 @@ struct SniperOverlayRoot;
 
 #[derive(Component)]
 struct CursorHintText;
+
+#[derive(Component)]
+struct DamageAlertBanner;
 
 #[derive(Component)]
 struct DamageHeaderText;
@@ -112,8 +123,13 @@ struct BattleEndTitleText;
 #[derive(Component)]
 struct BattleEndStatsText;
 
-#[derive(Component)]
-struct PlayAgainButton;
+/// Unified clickable action component for in-battle HUD buttons (Play Again / Return to Hangar).
+#[derive(Component, Copy, Clone, PartialEq, Eq)]
+enum HudButtonAction {
+    PlayAgain,
+    ToHangar,
+    TopHangarShortcut,
+}
 
 #[derive(Clone)]
 struct KillFeedEntry {
@@ -143,12 +159,13 @@ impl Plugin for HudPlugin {
         app.init_resource::<KillFeedBuffer>()
             .init_resource::<HitCamState>()
             .add_systems(
-                Startup,
+                OnEnter(AppState::InBattle),
                 (
+                    reset_hud_buffers,
                     setup_crosshair_and_telemetry,
-                    setup_battle_scoreboard_and_feed,
+                    setup_battle_scoreboard_and_hitcam,
                     setup_overhead_markers_and_modal,
-                    setup_minimap_hud,
+                    setup_minimap_and_kill_feed,
                 ),
             )
             .add_systems(
@@ -162,23 +179,36 @@ impl Plugin for HudPlugin {
                     update_kill_feed,
                     update_overhead_markers,
                     update_hud_minimap,
-                    update_battle_end_modal,
-                ),
+                    update_battle_end_modal_and_buttons,
+                )
+                    .run_if(in_state(AppState::InBattle)),
             );
     }
 }
 
+fn reset_hud_buffers(mut feed: ResMut<KillFeedBuffer>, mut hitcam: ResMut<HitCamState>) {
+    feed.entries.clear();
+    hitcam.timer = 0.0;
+    hitcam.title.clear();
+    hitcam.body.clear();
+}
+
 fn setup_crosshair_and_telemetry(mut commands: Commands, sim: Res<SimResource>) {
+    let player_cfg = &sim.0.player_tank().config;
+
     // 1. Center camera crosshair
     commands
-        .spawn(Node {
-            position_type: PositionType::Absolute,
-            width: Val::Percent(100.0),
-            height: Val::Percent(100.0),
-            justify_content: JustifyContent::Center,
-            align_items: AlignItems::Center,
-            ..default()
-        })
+        .spawn((
+            BattleEntity,
+            Node {
+                position_type: PositionType::Absolute,
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                ..default()
+            },
+        ))
         .with_children(|root| {
             root.spawn((
                 Node {
@@ -203,6 +233,7 @@ fn setup_crosshair_and_telemetry(mut commands: Commands, sim: Res<SimResource>) 
     // 2. Sniper gunner optic reticle overlay
     commands
         .spawn((
+            BattleEntity,
             SniperOverlayRoot,
             Node {
                 position_type: PositionType::Absolute,
@@ -250,6 +281,7 @@ fn setup_crosshair_and_telemetry(mut commands: Commands, sim: Res<SimResource>) 
 
     // 3. Trailing actual gun-bore aiming indicator
     commands.spawn((
+        BattleEntity,
         GunReticleMarker,
         Node {
             position_type: PositionType::Absolute,
@@ -264,88 +296,150 @@ fn setup_crosshair_and_telemetry(mut commands: Commands, sim: Res<SimResource>) 
         BackgroundColor(Color::NONE),
     ));
 
-    // 4. Top-left compact stage & controls header
+    // 4. Top-left compact vehicle & Hangar return bar
     let map_title = sim.0.map.name.to_uppercase();
+    let vehicle_header = format!(
+        "[{}] TIER {} {} | {}",
+        player_cfg.nation.short_tag(),
+        tier_roman(player_cfg.tier),
+        player_cfg.name.to_uppercase(),
+        map_title,
+    );
     commands
         .spawn((
+            BattleEntity,
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(12.0),
+                top: Val::Px(10.0),
+                flex_direction: FlexDirection::Column,
+                row_gap: Val::Px(4.0),
+                ..default()
+            },
+        ))
+        .with_children(|col| {
+            col.spawn((
+                Node {
+                    padding: UiRect::axes(Val::Px(10.0), Val::Px(6.0)),
+                    flex_direction: FlexDirection::Column,
+                    row_gap: Val::Px(2.0),
+                    border: UiRect::all(Val::Px(1.0)),
+                    ..default()
+                },
+                BorderColor::all(Color::srgba(0.48, 0.54, 0.50, 0.40)),
+                BackgroundColor(Color::srgba(0.05, 0.07, 0.07, 0.72)),
+            ))
+            .with_children(|panel| {
+                panel.spawn((
+                    Text::new(vehicle_header),
+                    TextFont {
+                        font_size: FontSize::Px(12.0),
+                        ..default()
+                    },
+                    TextColor(Color::srgb(0.95, 0.84, 0.42)),
+                ));
+                panel.spawn((
+                    Text::new("WASD: Drive | LMB/Space: Fire | Shift: Optic | C: FreeLook"),
+                    TextFont {
+                        font_size: FontSize::Px(10.5),
+                        ..default()
+                    },
+                    TextColor(Color::srgb(0.82, 0.86, 0.83)),
+                ));
+                panel.spawn((
+                    CursorHintText,
+                    Text::new("Click to lock aim | Esc: Unlock cursor"),
+                    TextFont {
+                        font_size: FontSize::Px(10.5),
+                        ..default()
+                    },
+                    TextColor(Color::srgb(0.95, 0.70, 0.28)),
+                ));
+            });
+
+            col.spawn((
+                HudButtonAction::TopHangarShortcut,
+                Node {
+                    align_self: AlignSelf::FlexStart,
+                    padding: UiRect::axes(Val::Px(10.0), Val::Px(4.0)),
+                    border: UiRect::all(Val::Px(1.0)),
+                    ..default()
+                },
+                BorderColor::all(Color::srgba(0.68, 0.72, 0.76, 0.55)),
+                BackgroundColor(Color::srgba(0.10, 0.14, 0.18, 0.82)),
+            ))
+            .with_children(|btn| {
+                btn.spawn((
+                    Text::new("< HANGAR (Esc -> Click)"),
+                    TextFont {
+                        font_size: FontSize::Px(10.5),
+                        ..default()
+                    },
+                    TextColor(Color::srgb(0.88, 0.92, 0.96)),
+                ));
+            });
+        });
+
+    // 5. Bottom-Left War Thunder Ground Battles Damage Schematic + Compact Telemetry Strip
+    commands
+        .spawn((
+            BattleEntity,
             Node {
                 position_type: PositionType::Absolute,
                 left: Val::Px(14.0),
-                top: Val::Px(12.0),
-                max_width: Val::Px(348.0),
-                padding: UiRect::axes(Val::Px(10.0), Val::Px(7.0)),
+                bottom: Val::Px(12.0),
+                width: Val::Px(292.0),
                 flex_direction: FlexDirection::Column,
-                row_gap: Val::Px(3.0),
+                row_gap: Val::Px(5.0),
                 ..default()
             },
-            BackgroundColor(Color::srgba(0.07, 0.09, 0.08, 0.74)),
         ))
-        .with_children(|panel| {
-            panel.spawn((
-                Text::new(format!("STAGE 4 | {map_title} - WT DAMAGE & 75MM AP")),
-                TextFont {
-                    font_size: FontSize::Px(12.5),
+        .with_children(|stack| {
+            // Dynamic damage warning banner above schematic (hidden when nominal)
+            stack.spawn((
+                DamageAlertBanner,
+                Node {
+                    display: Display::None,
+                    padding: UiRect::axes(Val::Px(8.0), Val::Px(3.0)),
+                    border: UiRect::all(Val::Px(1.0)),
                     ..default()
                 },
-                TextColor(Color::srgb(0.92, 0.82, 0.40)),
-            ));
-            panel.spawn((
-                Text::new("WASD: Drive | LMB/Space: Fire | Shift: Optic | C: FreeLook | Esc: Cursor"),
-                TextFont {
-                    font_size: FontSize::Px(11.0),
-                    ..default()
-                },
-                TextColor(Color::srgb(0.84, 0.87, 0.83)),
-            ));
-            panel.spawn((
-                CursorHintText,
-                Text::new("Click window to lock mouse aiming"),
+                BorderColor::all(Color::srgb(0.98, 0.40, 0.22)),
+                BackgroundColor(Color::srgba(0.28, 0.08, 0.06, 0.88)),
+                Text::new(""),
                 TextFont {
                     font_size: FontSize::Px(11.5),
                     ..default()
                 },
-                TextColor(Color::srgb(0.95, 0.68, 0.25)),
+                TextColor(Color::srgb(1.0, 0.84, 0.62)),
             ));
-        });
 
-    // 5. Bottom-left stack: War Thunder Crew/Module Schematic + Telemetry & Reload
-    commands
-        .spawn(Node {
-            position_type: PositionType::Absolute,
-            left: Val::Px(16.0),
-            bottom: Val::Px(16.0),
-            width: Val::Px(300.0),
-            flex_direction: FlexDirection::Column,
-            row_gap: Val::Px(8.0),
-            ..default()
-        })
-        .with_children(|stack| {
-            // 5a. War Thunder Crew & Internal Module Damage Schematic (strictly no HP bar!)
+            // Translucent X-Ray Module & Crew Card (strictly NO HP bar!)
             stack
                 .spawn((
                     Node {
                         width: Val::Percent(100.0),
-                        padding: UiRect::all(Val::Px(9.0)),
+                        padding: UiRect::all(Val::Px(8.0)),
                         flex_direction: FlexDirection::Column,
-                        row_gap: Val::Px(6.0),
+                        row_gap: Val::Px(5.0),
                         border: UiRect::all(Val::Px(1.0)),
                         ..default()
                     },
-                    BorderColor::all(Color::srgba(0.55, 0.60, 0.54, 0.50)),
-                    BackgroundColor(Color::srgba(0.06, 0.08, 0.07, 0.82)),
+                    BorderColor::all(Color::srgba(0.55, 0.60, 0.56, 0.45)),
+                    BackgroundColor(Color::srgba(0.05, 0.07, 0.07, 0.78)),
                 ))
                 .with_children(|diag| {
                     diag.spawn((
                         DamageHeaderText,
-                        Text::new("CREW 5/5 | MODULES NOMINAL"),
+                        Text::new("CREW 5/5 | COMBAT READY"),
                         TextFont {
-                            font_size: FontSize::Px(11.5),
+                            font_size: FontSize::Px(11.0),
                             ..default()
                         },
                         TextColor(Color::srgb(0.76, 0.94, 0.78)),
                     ));
 
-                    // Crew seat chips row
+                    // Crew seats row
                     diag.spawn(Node {
                         width: Val::Percent(100.0),
                         column_gap: Val::Px(4.0),
@@ -365,7 +459,7 @@ fn setup_crosshair_and_telemetry(mut commands: Commands, sim: Res<SimResource>) 
                                 BackgroundColor(Color::srgba(0.14, 0.34, 0.18, 0.85)),
                                 Text::new(seat.short_label()),
                                 TextFont {
-                                    font_size: FontSize::Px(10.5),
+                                    font_size: FontSize::Px(10.0),
                                     ..default()
                                 },
                                 TextColor(Color::WHITE),
@@ -373,7 +467,7 @@ fn setup_crosshair_and_telemetry(mut commands: Commands, sim: Res<SimResource>) 
                         }
                     });
 
-                    // Modules status chips (2 compact rows)
+                    // Modules status grid
                     diag.spawn(Node {
                         width: Val::Percent(100.0),
                         column_gap: Val::Px(4.0),
@@ -390,11 +484,11 @@ fn setup_crosshair_and_telemetry(mut commands: Commands, sim: Res<SimResource>) 
                                     border: UiRect::all(Val::Px(1.0)),
                                     ..default()
                                 },
-                                BorderColor::all(Color::srgba(0.50, 0.54, 0.50, 0.75)),
-                                BackgroundColor(Color::srgba(0.20, 0.23, 0.21, 0.88)),
+                                BorderColor::all(Color::srgba(0.50, 0.54, 0.50, 0.72)),
+                                BackgroundColor(Color::srgba(0.18, 0.21, 0.20, 0.86)),
                                 Text::new(kind.short_label()),
                                 TextFont {
-                                    font_size: FontSize::Px(10.5),
+                                    font_size: FontSize::Px(10.0),
                                     ..default()
                                 },
                                 TextColor(Color::srgb(0.86, 0.88, 0.85)),
@@ -403,97 +497,160 @@ fn setup_crosshair_and_telemetry(mut commands: Commands, sim: Res<SimResource>) 
                     });
                 });
 
-            // 5b. Telemetry & Cannon Reload Panel
+            // Compact War Thunder single-line bottom strip (GEAR | SPD | SLOPE | TUR | VIEW)
             stack
                 .spawn((
                     Node {
                         width: Val::Percent(100.0),
-                        padding: UiRect::all(Val::Px(10.0)),
-                        flex_direction: FlexDirection::Column,
-                        row_gap: Val::Px(6.0),
+                        padding: UiRect::axes(Val::Px(8.0), Val::Px(5.0)),
+                        border: UiRect::all(Val::Px(1.0)),
                         ..default()
                     },
-                    BackgroundColor(Color::srgba(0.07, 0.09, 0.08, 0.80)),
+                    BorderColor::all(Color::srgba(0.45, 0.50, 0.48, 0.38)),
+                    BackgroundColor(Color::srgba(0.05, 0.07, 0.07, 0.78)),
                 ))
-                .with_children(|panel| {
-                    panel.spawn((
-                        TelemetryText,
-                        Text::new("SPD   0 km/h | GEAR N\nSHELL 75mm M72 AP\nGUN   READY"),
+                .with_children(|strip| {
+                    strip.spawn((
+                        TelemetryStripText,
+                        Text::new("GEAR N | SPD 0 km/h | SLOPE +0 deg | TUR +0 deg"),
                         TextFont {
-                            font_size: FontSize::Px(12.5),
+                            font_size: FontSize::Px(11.0),
                             ..default()
                         },
                         TextColor(Color::srgb(0.92, 0.95, 0.90)),
                     ));
+                });
+        });
 
-                    panel
-                        .spawn((
-                            Node {
-                                width: Val::Percent(100.0),
-                                height: Val::Px(8.0),
+    // 6. Bottom-Center War Thunder Ammo Action Bar (AP shell slot + integrated reload gauge)
+    commands
+        .spawn((
+            BattleEntity,
+            Node {
+                position_type: PositionType::Absolute,
+                bottom: Val::Px(12.0),
+                width: Val::Percent(100.0),
+                justify_content: JustifyContent::Center,
+                ..default()
+            },
+        ))
+        .with_children(|center| {
+            center
+                .spawn((
+                    Node {
+                        width: Val::Px(240.0),
+                        padding: UiRect::all(Val::Px(7.0)),
+                        flex_direction: FlexDirection::Column,
+                        row_gap: Val::Px(4.0),
+                        border: UiRect::all(Val::Px(1.5)),
+                        ..default()
+                    },
+                    BorderColor::all(Color::srgb(0.86, 0.74, 0.36)),
+                    BackgroundColor(Color::srgba(0.05, 0.07, 0.08, 0.84)),
+                ))
+                .with_children(|slot| {
+                    slot.spawn((
+                        Node {
+                            width: Val::Percent(100.0),
+                            justify_content: JustifyContent::SpaceBetween,
+                            ..default()
+                        },
+                    ))
+                    .with_children(|top_row| {
+                        top_row.spawn((
+                            AmmoSlotLabelText,
+                            Text::new(format!(
+                                "[1] {} ({:.0}mm)",
+                                player_cfg.shell.name, player_cfg.shell.penetration_0m_mm
+                            )),
+                            TextFont {
+                                font_size: FontSize::Px(11.5),
                                 ..default()
                             },
-                            BackgroundColor(Color::srgba(0.22, 0.24, 0.22, 0.9)),
-                        ))
-                        .with_children(|bar_bg| {
-                            bar_bg.spawn((
-                                ReloadFillBar,
-                                Node {
-                                    width: Val::Percent(100.0),
-                                    height: Val::Percent(100.0),
-                                    ..default()
-                                },
-                                BackgroundColor(Color::srgb(0.28, 0.88, 0.36)),
-                            ));
-                        });
+                            TextColor(Color::srgb(0.96, 0.94, 0.86)),
+                        ));
+                        top_row.spawn((
+                            AmmoSlotStatusText,
+                            Text::new("READY"),
+                            TextFont {
+                                font_size: FontSize::Px(11.0),
+                                ..default()
+                            },
+                            TextColor(Color::srgb(0.32, 0.94, 0.42)),
+                        ));
+                    });
+
+                    slot.spawn((
+                        Node {
+                            width: Val::Percent(100.0),
+                            height: Val::Px(6.0),
+                            ..default()
+                        },
+                        BackgroundColor(Color::srgba(0.20, 0.22, 0.22, 0.92)),
+                    ))
+                    .with_children(|bar_bg| {
+                        bar_bg.spawn((
+                            ReloadFillBar,
+                            Node {
+                                width: Val::Percent(100.0),
+                                height: Val::Percent(100.0),
+                                ..default()
+                            },
+                            BackgroundColor(Color::srgb(0.28, 0.88, 0.36)),
+                        ));
+                    });
                 });
         });
 }
 
-fn setup_battle_scoreboard_and_feed(mut commands: Commands, sim: Res<SimResource>) {
-    // Top-center War Thunder ticket & capture zone bar
+fn setup_battle_scoreboard_and_hitcam(mut commands: Commands, sim: Res<SimResource>) {
+    // Top-center War Thunder ticket bar with A/B/C capture zone badges stacked right beneath it
     commands
-        .spawn(Node {
-            position_type: PositionType::Absolute,
-            top: Val::Px(10.0),
-            width: Val::Percent(100.0),
-            flex_direction: FlexDirection::Column,
-            align_items: AlignItems::Center,
-            row_gap: Val::Px(4.0),
-            ..default()
-        })
+        .spawn((
+            BattleEntity,
+            Node {
+                position_type: PositionType::Absolute,
+                top: Val::Px(8.0),
+                width: Val::Percent(100.0),
+                flex_direction: FlexDirection::Column,
+                align_items: AlignItems::Center,
+                row_gap: Val::Px(4.0),
+                ..default()
+            },
+        ))
         .with_children(|wrapper| {
+            // Slim blue vs red horizontal ticket bar
             wrapper
                 .spawn((
                     Node {
-                        padding: UiRect::axes(Val::Px(10.0), Val::Px(6.0)),
+                        padding: UiRect::axes(Val::Px(10.0), Val::Px(5.0)),
                         align_items: AlignItems::Center,
                         column_gap: Val::Px(8.0),
                         border: UiRect::all(Val::Px(1.0)),
                         ..default()
                     },
-                    BorderColor::all(Color::srgba(0.65, 0.68, 0.60, 0.45)),
-                    BackgroundColor(Color::srgba(0.06, 0.08, 0.07, 0.82)),
+                    BorderColor::all(Color::srgba(0.58, 0.62, 0.58, 0.42)),
+                    BackgroundColor(Color::srgba(0.05, 0.07, 0.07, 0.80)),
                 ))
                 .with_children(|bar| {
                     bar.spawn((
                         AlliesScoreText,
                         Text::new("6 | 800"),
                         TextFont {
-                            font_size: FontSize::Px(13.0),
+                            font_size: FontSize::Px(12.5),
                             ..default()
                         },
-                        TextColor(Color::srgb(0.42, 0.72, 1.0)),
+                        TextColor(Color::srgb(0.42, 0.74, 1.0)),
                     ));
 
                     bar.spawn((
                         Node {
-                            width: Val::Px(104.0),
-                            height: Val::Px(10.0),
+                            width: Val::Px(128.0),
+                            height: Val::Px(9.0),
                             justify_content: JustifyContent::FlexEnd,
                             ..default()
                         },
-                        BackgroundColor(Color::srgba(0.16, 0.20, 0.25, 0.9)),
+                        BackgroundColor(Color::srgba(0.14, 0.18, 0.24, 0.90)),
                     ))
                     .with_children(|bg| {
                         bg.spawn((
@@ -507,40 +664,23 @@ fn setup_battle_scoreboard_and_feed(mut commands: Commands, sim: Res<SimResource
                         ));
                     });
 
-                    for (idx, zone) in sim.0.battle.zones.iter().enumerate() {
-                        bar.spawn((
-                            ScoreboardZoneBadge(idx),
-                            Node {
-                                width: Val::Px(24.0),
-                                height: Val::Px(24.0),
-                                justify_content: JustifyContent::Center,
-                                align_items: AlignItems::Center,
-                                border: UiRect::all(Val::Px(1.5)),
-                                ..default()
-                            },
-                            BorderColor::all(Color::srgb(0.85, 0.82, 0.36)),
-                            BackgroundColor(Color::srgba(0.14, 0.16, 0.14, 0.9)),
-                        ))
-                        .with_children(|badge| {
-                            badge.spawn((
-                                Text::new(zone.label.to_string()),
-                                TextFont {
-                                    font_size: FontSize::Px(13.0),
-                                    ..default()
-                                },
-                                TextColor(Color::WHITE),
-                            ));
-                        });
-                    }
+                    bar.spawn((
+                        Node {
+                            width: Val::Px(2.0),
+                            height: Val::Px(14.0),
+                            ..default()
+                        },
+                        BackgroundColor(Color::srgba(0.88, 0.90, 0.88, 0.65)),
+                    ));
 
                     bar.spawn((
                         Node {
-                            width: Val::Px(104.0),
-                            height: Val::Px(10.0),
+                            width: Val::Px(128.0),
+                            height: Val::Px(9.0),
                             justify_content: JustifyContent::FlexStart,
                             ..default()
                         },
-                        BackgroundColor(Color::srgba(0.26, 0.16, 0.16, 0.9)),
+                        BackgroundColor(Color::srgba(0.24, 0.14, 0.14, 0.90)),
                     ))
                     .with_children(|bg| {
                         bg.spawn((
@@ -558,22 +698,57 @@ fn setup_battle_scoreboard_and_feed(mut commands: Commands, sim: Res<SimResource
                         AxisScoreText,
                         Text::new("800 | 6"),
                         TextFont {
-                            font_size: FontSize::Px(13.0),
+                            font_size: FontSize::Px(12.5),
                             ..default()
                         },
                         TextColor(Color::srgb(0.98, 0.44, 0.40)),
                     ));
                 });
 
+            // A / B / C capture badges centered directly underneath ticket bar (WT Ground Battles layout)
+            wrapper
+                .spawn(Node {
+                    align_items: AlignItems::Center,
+                    column_gap: Val::Px(8.0),
+                    ..default()
+                })
+                .with_children(|row| {
+                    for (idx, zone) in sim.0.battle.zones.iter().enumerate() {
+                        row.spawn((
+                            ScoreboardZoneBadge(idx),
+                            Node {
+                                width: Val::Px(24.0),
+                                height: Val::Px(24.0),
+                                justify_content: JustifyContent::Center,
+                                align_items: AlignItems::Center,
+                                border: UiRect::all(Val::Px(1.5)),
+                                ..default()
+                            },
+                            BorderColor::all(Color::srgb(0.85, 0.82, 0.36)),
+                            BackgroundColor(Color::srgba(0.12, 0.14, 0.13, 0.90)),
+                        ))
+                        .with_children(|badge| {
+                            badge.spawn((
+                                Text::new(zone.label.to_string()),
+                                TextFont {
+                                    font_size: FontSize::Px(12.5),
+                                    ..default()
+                                },
+                                TextColor(Color::WHITE),
+                            ));
+                        });
+                    }
+                });
+
             wrapper.spawn((
                 BattleSubStatusText,
                 Text::new("00:00 | KILLS 0 | PENS 0"),
                 TextFont {
-                    font_size: FontSize::Px(12.0),
+                    font_size: FontSize::Px(11.0),
                     ..default()
                 },
-                TextColor(Color::srgb(0.92, 0.94, 0.90)),
-                BackgroundColor(Color::srgba(0.06, 0.08, 0.07, 0.65)),
+                TextColor(Color::srgb(0.90, 0.93, 0.89)),
+                BackgroundColor(Color::srgba(0.05, 0.07, 0.07, 0.62)),
                 Node {
                     padding: UiRect::axes(Val::Px(8.0), Val::Px(2.0)),
                     ..default()
@@ -581,73 +756,45 @@ fn setup_battle_scoreboard_and_feed(mut commands: Commands, sim: Res<SimResource
             ));
         });
 
-    // Top-right stack: Kill Feed + War Thunder Hit-Cam Damage Report Panel
+    // Top-Right War Thunder Hit-Cam Damage Report Panel (cleanly separated from bottom-right Kill Feed)
     commands
-        .spawn(Node {
-            position_type: PositionType::Absolute,
-            right: Val::Px(14.0),
-            top: Val::Px(12.0),
-            flex_direction: FlexDirection::Column,
-            align_items: AlignItems::FlexEnd,
-            row_gap: Val::Px(6.0),
-            ..default()
-        })
-        .with_children(|col| {
-            // Kill feed rows
-            for row in 0..KILL_FEED_ROWS {
-                col.spawn((
-                    KillFeedRow(row),
-                    Node {
-                        display: Display::None,
-                        padding: UiRect::axes(Val::Px(8.0), Val::Px(3.0)),
-                        ..default()
-                    },
-                    BackgroundColor(Color::srgba(0.06, 0.08, 0.07, 0.78)),
-                    Text::new(""),
-                    TextFont {
-                        font_size: FontSize::Px(11.5),
-                        ..default()
-                    },
-                    TextColor(Color::WHITE),
-                ));
-            }
-
-            // Hit-Cam / Shell Impact Report Panel (shown for 5.5s on player shots)
-            col.spawn((
-                HitCamPanel,
-                Node {
-                    display: Display::None,
-                    width: Val::Px(286.0),
-                    padding: UiRect::all(Val::Px(9.0)),
-                    margin: UiRect::top(Val::Px(6.0)),
-                    flex_direction: FlexDirection::Column,
-                    row_gap: Val::Px(4.0),
-                    border: UiRect::all(Val::Px(1.5)),
+        .spawn((
+            BattleEntity,
+            HitCamPanel,
+            Node {
+                position_type: PositionType::Absolute,
+                right: Val::Px(14.0),
+                top: Val::Px(12.0),
+                display: Display::None,
+                width: Val::Px(292.0),
+                padding: UiRect::all(Val::Px(9.0)),
+                flex_direction: FlexDirection::Column,
+                row_gap: Val::Px(4.0),
+                border: UiRect::all(Val::Px(1.5)),
+                ..default()
+            },
+            BorderColor::all(Color::srgb(0.35, 0.90, 0.45)),
+            BackgroundColor(Color::srgba(0.04, 0.06, 0.06, 0.88)),
+        ))
+        .with_children(|card| {
+            card.spawn((
+                HitCamTitleText,
+                Text::new("PENETRATION"),
+                TextFont {
+                    font_size: FontSize::Px(13.0),
                     ..default()
                 },
-                BorderColor::all(Color::srgb(0.35, 0.90, 0.45)),
-                BackgroundColor(Color::srgba(0.05, 0.07, 0.06, 0.88)),
-            ))
-            .with_children(|card| {
-                card.spawn((
-                    HitCamTitleText,
-                    Text::new("PENETRATION"),
-                    TextFont {
-                        font_size: FontSize::Px(13.0),
-                        ..default()
-                    },
-                    TextColor(Color::srgb(0.35, 0.95, 0.45)),
-                ));
-                card.spawn((
-                    HitCamBodyText,
-                    Text::new(""),
-                    TextFont {
-                        font_size: FontSize::Px(11.5),
-                        ..default()
-                    },
-                    TextColor(Color::srgb(0.90, 0.93, 0.88)),
-                ));
-            });
+                TextColor(Color::srgb(0.35, 0.95, 0.45)),
+            ));
+            card.spawn((
+                HitCamBodyText,
+                Text::new(""),
+                TextFont {
+                    font_size: FontSize::Px(11.5),
+                    ..default()
+                },
+                TextColor(Color::srgb(0.90, 0.93, 0.88)),
+            ));
         });
 }
 
@@ -655,6 +802,7 @@ fn setup_overhead_markers_and_modal(mut commands: Commands) {
     // Pooled 3D-projected overhead tank tags (strictly NO HP bar!)
     for i in 0..MAX_TANKS {
         commands.spawn((
+            BattleEntity,
             OverheadMarker(i),
             Node {
                 position_type: PositionType::Absolute,
@@ -669,16 +817,17 @@ fn setup_overhead_markers_and_modal(mut commands: Commands) {
             BackgroundColor(Color::srgba(0.05, 0.07, 0.06, 0.72)),
             Text::new(""),
             TextFont {
-                font_size: FontSize::Px(11.0),
+                font_size: FontSize::Px(10.5),
                 ..default()
             },
             TextColor(Color::WHITE),
         ));
     }
 
-    // Centered End-of-Battle overlay modal
+    // Centered End-of-Battle overlay modal with PLAY AGAIN & TO HANGAR buttons
     commands
         .spawn((
+            BattleEntity,
             BattleEndOverlay,
             Node {
                 position_type: PositionType::Absolute,
@@ -689,13 +838,13 @@ fn setup_overhead_markers_and_modal(mut commands: Commands) {
                 display: Display::None,
                 ..default()
             },
-            BackgroundColor(Color::srgba(0.02, 0.03, 0.03, 0.56)),
+            BackgroundColor(Color::srgba(0.02, 0.03, 0.03, 0.58)),
         ))
         .with_children(|backdrop| {
             backdrop
                 .spawn((
                     Node {
-                        width: Val::Px(360.0),
+                        width: Val::Px(400.0),
                         padding: UiRect::all(Val::Px(22.0)),
                         flex_direction: FlexDirection::Column,
                         align_items: AlignItems::Center,
@@ -704,7 +853,7 @@ fn setup_overhead_markers_and_modal(mut commands: Commands) {
                         ..default()
                     },
                     BorderColor::all(Color::srgba(0.88, 0.80, 0.42, 0.85)),
-                    BackgroundColor(Color::srgba(0.07, 0.09, 0.08, 0.94)),
+                    BackgroundColor(Color::srgba(0.06, 0.08, 0.09, 0.95)),
                 ))
                 .with_children(|card| {
                     card.spawn((
@@ -720,39 +869,69 @@ fn setup_overhead_markers_and_modal(mut commands: Commands) {
                         BattleEndStatsText,
                         Text::new("ALLIES 800 - 0 AXIS"),
                         TextFont {
-                            font_size: FontSize::Px(14.0),
+                            font_size: FontSize::Px(13.5),
                             ..default()
                         },
                         TextColor(Color::srgb(0.90, 0.92, 0.88)),
                     ));
-                    card.spawn((
-                        PlayAgainButton,
-                        Node {
-                            padding: UiRect::axes(Val::Px(22.0), Val::Px(10.0)),
-                            margin: UiRect::top(Val::Px(6.0)),
-                            border: UiRect::all(Val::Px(1.5)),
-                            justify_content: JustifyContent::Center,
-                            align_items: AlignItems::Center,
-                            ..default()
-                        },
-                        BorderColor::all(Color::srgb(0.95, 0.85, 0.42)),
-                        BackgroundColor(Color::srgb(0.18, 0.34, 0.20)),
-                    ))
-                    .with_children(|btn| {
-                        btn.spawn((
-                            Text::new("PLAY AGAIN (Enter)"),
-                            TextFont {
-                                font_size: FontSize::Px(15.0),
+
+                    card.spawn(Node {
+                        margin: UiRect::top(Val::Px(8.0)),
+                        column_gap: Val::Px(10.0),
+                        ..default()
+                    })
+                    .with_children(|row| {
+                        row.spawn((
+                            HudButtonAction::PlayAgain,
+                            Node {
+                                padding: UiRect::axes(Val::Px(18.0), Val::Px(10.0)),
+                                border: UiRect::all(Val::Px(1.5)),
+                                justify_content: JustifyContent::Center,
+                                align_items: AlignItems::Center,
                                 ..default()
                             },
-                            TextColor(Color::WHITE),
-                        ));
+                            BorderColor::all(Color::srgb(1.0, 0.64, 0.34)),
+                            BackgroundColor(Color::srgb(0.83, 0.29, 0.11)),
+                        ))
+                        .with_children(|btn| {
+                            btn.spawn((
+                                Text::new("PLAY AGAIN (Enter)"),
+                                TextFont {
+                                    font_size: FontSize::Px(14.0),
+                                    ..default()
+                                },
+                                TextColor(Color::WHITE),
+                            ));
+                        });
+
+                        row.spawn((
+                            HudButtonAction::ToHangar,
+                            Node {
+                                padding: UiRect::axes(Val::Px(18.0), Val::Px(10.0)),
+                                border: UiRect::all(Val::Px(1.5)),
+                                justify_content: JustifyContent::Center,
+                                align_items: AlignItems::Center,
+                                ..default()
+                            },
+                            BorderColor::all(Color::srgb(0.36, 0.80, 0.98)),
+                            BackgroundColor(Color::srgb(0.11, 0.40, 0.56)),
+                        ))
+                        .with_children(|btn| {
+                            btn.spawn((
+                                Text::new("TO HANGAR (H)"),
+                                TextFont {
+                                    font_size: FontSize::Px(14.0),
+                                    ..default()
+                                },
+                                TextColor(Color::WHITE),
+                            ));
+                        });
                     });
                 });
         });
 }
 
-fn setup_minimap_hud(
+fn setup_minimap_and_kill_feed(
     mut commands: Commands,
     sim: Res<SimResource>,
     mut images: ResMut<Assets<Image>>,
@@ -777,125 +956,165 @@ fn setup_minimap_hud(
         sim.0.map.size_m
     );
 
+    // Bottom-Right Stack: Kill Feed stacked directly ABOVE the tactical minimap (WT Ground Battles layout)
     commands
         .spawn((
+            BattleEntity,
             Node {
                 position_type: PositionType::Absolute,
-                right: Val::Px(16.0),
-                bottom: Val::Px(16.0),
-                padding: UiRect::all(Val::Px(8.0)),
+                right: Val::Px(14.0),
+                bottom: Val::Px(12.0),
                 flex_direction: FlexDirection::Column,
+                align_items: AlignItems::FlexEnd,
                 row_gap: Val::Px(6.0),
-                border: UiRect::all(Val::Px(1.5)),
                 ..default()
             },
-            BorderColor::all(Color::srgba(0.65, 0.68, 0.60, 0.55)),
-            BackgroundColor(Color::srgba(0.06, 0.08, 0.07, 0.84)),
         ))
-        .with_children(|frame| {
-            frame.spawn((
-                Text::new(map_header),
-                TextFont {
-                    font_size: FontSize::Px(11.0),
+        .with_children(|col| {
+            // Kill feed column sitting directly above minimap
+            col.spawn(Node {
+                flex_direction: FlexDirection::Column,
+                align_items: AlignItems::FlexEnd,
+                row_gap: Val::Px(3.0),
+                ..default()
+            })
+            .with_children(|feed_col| {
+                for row in 0..KILL_FEED_ROWS {
+                    feed_col.spawn((
+                        KillFeedRow(row),
+                        Node {
+                            display: Display::None,
+                            padding: UiRect::axes(Val::Px(8.0), Val::Px(3.0)),
+                            ..default()
+                        },
+                        BackgroundColor(Color::srgba(0.05, 0.07, 0.07, 0.78)),
+                        Text::new(""),
+                        TextFont {
+                            font_size: FontSize::Px(11.0),
+                            ..default()
+                        },
+                        TextColor(Color::WHITE),
+                    ));
+                }
+            });
+
+            // 192x192 Tactical Minimap frame
+            col.spawn((
+                Node {
+                    padding: UiRect::all(Val::Px(7.0)),
+                    flex_direction: FlexDirection::Column,
+                    row_gap: Val::Px(5.0),
+                    border: UiRect::all(Val::Px(1.5)),
                     ..default()
                 },
-                TextColor(Color::srgb(0.88, 0.84, 0.58)),
-            ));
-
-            frame
-                .spawn((
-                    Node {
-                        width: Val::Px(MINIMAP_DISPLAY_PX),
-                        height: Val::Px(MINIMAP_DISPLAY_PX),
-                        border: UiRect::all(Val::Px(1.0)),
+                BorderColor::all(Color::srgba(0.62, 0.66, 0.60, 0.52)),
+                BackgroundColor(Color::srgba(0.05, 0.07, 0.07, 0.84)),
+            ))
+            .with_children(|frame| {
+                frame.spawn((
+                    Text::new(map_header),
+                    TextFont {
+                        font_size: FontSize::Px(10.5),
                         ..default()
                     },
-                    BorderColor::all(Color::srgba(0.85, 0.88, 0.82, 0.45)),
-                    ImageNode::new(minimap_handle),
-                ))
-                .with_children(|map_box| {
-                    for (idx, zone) in sim.0.map.capture_zones.iter().enumerate() {
-                        let uv = sim.0.map.world_to_minimap_uv(zone.center);
-                        let px = (uv.x * MINIMAP_DISPLAY_PX - 9.0)
-                            .clamp(0.0, MINIMAP_DISPLAY_PX - 18.0);
-                        let py = (uv.y * MINIMAP_DISPLAY_PX - 9.0)
-                            .clamp(0.0, MINIMAP_DISPLAY_PX - 18.0);
+                    TextColor(Color::srgb(0.88, 0.84, 0.58)),
+                ));
 
-                        map_box
-                            .spawn((
-                                MinimapZoneBadge(idx),
-                                Node {
-                                    position_type: PositionType::Absolute,
-                                    left: Val::Px(px),
-                                    top: Val::Px(py),
-                                    width: Val::Px(18.0),
-                                    height: Val::Px(18.0),
-                                    justify_content: JustifyContent::Center,
-                                    align_items: AlignItems::Center,
-                                    border: UiRect::all(Val::Px(1.5)),
-                                    ..default()
-                                },
-                                BorderColor::all(Color::srgba(0.95, 0.85, 0.28, 0.95)),
-                                BackgroundColor(Color::srgba(0.08, 0.10, 0.09, 0.78)),
-                            ))
-                            .with_children(|badge| {
-                                badge.spawn((
-                                    Text::new(zone.label.to_string()),
-                                    TextFont {
-                                        font_size: FontSize::Px(11.0),
+                frame
+                    .spawn((
+                        Node {
+                            width: Val::Px(MINIMAP_DISPLAY_PX),
+                            height: Val::Px(MINIMAP_DISPLAY_PX),
+                            border: UiRect::all(Val::Px(1.0)),
+                            ..default()
+                        },
+                        BorderColor::all(Color::srgba(0.85, 0.88, 0.82, 0.45)),
+                        ImageNode::new(minimap_handle),
+                    ))
+                    .with_children(|map_box| {
+                        for (idx, zone) in sim.0.map.capture_zones.iter().enumerate() {
+                            let uv = sim.0.map.world_to_minimap_uv(zone.center);
+                            let px = (uv.x * MINIMAP_DISPLAY_PX - 9.0)
+                                .clamp(0.0, MINIMAP_DISPLAY_PX - 18.0);
+                            let py = (uv.y * MINIMAP_DISPLAY_PX - 9.0)
+                                .clamp(0.0, MINIMAP_DISPLAY_PX - 18.0);
+
+                            map_box
+                                .spawn((
+                                    MinimapZoneBadge(idx),
+                                    Node {
+                                        position_type: PositionType::Absolute,
+                                        left: Val::Px(px),
+                                        top: Val::Px(py),
+                                        width: Val::Px(18.0),
+                                        height: Val::Px(18.0),
+                                        justify_content: JustifyContent::Center,
+                                        align_items: AlignItems::Center,
+                                        border: UiRect::all(Val::Px(1.5)),
                                         ..default()
                                     },
-                                    TextColor(Color::WHITE),
-                                ));
-                            });
-                    }
+                                    BorderColor::all(Color::srgba(0.95, 0.85, 0.28, 0.95)),
+                                    BackgroundColor(Color::srgba(0.08, 0.10, 0.09, 0.78)),
+                                ))
+                                .with_children(|badge| {
+                                    badge.spawn((
+                                        Text::new(zone.label.to_string()),
+                                        TextFont {
+                                            font_size: FontSize::Px(11.0),
+                                            ..default()
+                                        },
+                                        TextColor(Color::WHITE),
+                                    ));
+                                });
+                        }
 
-                    map_box.spawn((
-                        MinimapGunHeadingPip,
-                        Node {
-                            position_type: PositionType::Absolute,
-                            left: Val::Px(0.0),
-                            top: Val::Px(0.0),
-                            width: Val::Px(4.0),
-                            height: Val::Px(4.0),
-                            ..default()
-                        },
-                        BackgroundColor(Color::srgb(1.0, 0.88, 0.25)),
-                    ));
-
-                    map_box.spawn((
-                        MinimapHullHeadingPip,
-                        Node {
-                            position_type: PositionType::Absolute,
-                            left: Val::Px(0.0),
-                            top: Val::Px(0.0),
-                            width: Val::Px(4.0),
-                            height: Val::Px(4.0),
-                            ..default()
-                        },
-                        BackgroundColor(Color::srgb(0.75, 1.0, 0.65)),
-                    ));
-
-                    for i in (0..MAX_TANKS).rev() {
-                        let is_player = i == 0;
-                        let sz = if is_player { 8.0 } else { 6.0 };
                         map_box.spawn((
-                            MinimapUnitDot(i),
+                            MinimapGunHeadingPip,
                             Node {
                                 position_type: PositionType::Absolute,
                                 left: Val::Px(0.0),
                                 top: Val::Px(0.0),
-                                width: Val::Px(sz),
-                                height: Val::Px(sz),
-                                display: Display::None,
-                                border: UiRect::all(Val::Px(1.0)),
+                                width: Val::Px(4.0),
+                                height: Val::Px(4.0),
                                 ..default()
                             },
-                            BorderColor::all(Color::srgb(0.04, 0.06, 0.05)),
-                            BackgroundColor(Color::srgb(0.22, 0.96, 0.34)),
+                            BackgroundColor(Color::srgb(1.0, 0.88, 0.25)),
                         ));
-                    }
-                });
+
+                        map_box.spawn((
+                            MinimapHullHeadingPip,
+                            Node {
+                                position_type: PositionType::Absolute,
+                                left: Val::Px(0.0),
+                                top: Val::Px(0.0),
+                                width: Val::Px(4.0),
+                                height: Val::Px(4.0),
+                                ..default()
+                            },
+                            BackgroundColor(Color::srgb(0.75, 1.0, 0.65)),
+                        ));
+
+                        for i in (0..MAX_TANKS).rev() {
+                            let is_player = i == 0;
+                            let sz = if is_player { 8.0 } else { 6.0 };
+                            map_box.spawn((
+                                MinimapUnitDot(i),
+                                Node {
+                                    position_type: PositionType::Absolute,
+                                    left: Val::Px(0.0),
+                                    top: Val::Px(0.0),
+                                    width: Val::Px(sz),
+                                    height: Val::Px(sz),
+                                    display: Display::None,
+                                    border: UiRect::all(Val::Px(1.0)),
+                                    ..default()
+                                },
+                                BorderColor::all(Color::srgb(0.04, 0.06, 0.05)),
+                                BackgroundColor(Color::srgb(0.22, 0.96, 0.34)),
+                            ));
+                        }
+                    });
+            });
         });
 }
 
@@ -904,8 +1123,10 @@ fn update_hud_telemetry(
     sim: Res<SimResource>,
     cam_ctrl: Res<TankCameraController>,
     mut texts: ParamSet<(
-        Query<&mut Text, With<TelemetryText>>,
+        Query<&mut Text, With<TelemetryStripText>>,
         Query<(&mut Text, &mut TextColor), With<CursorHintText>>,
+        Query<&mut Text, With<AmmoSlotLabelText>>,
+        Query<(&mut Text, &mut TextColor), With<AmmoSlotStatusText>>,
     )>,
     mut reload_bar_q: Query<(&mut Node, &mut BackgroundColor), With<ReloadFillBar>>,
 ) {
@@ -913,47 +1134,27 @@ fn update_hud_telemetry(
     let tank = &player.state;
     let mods = player.damage.mobility_modifiers();
 
-    if let Ok(mut text) = texts.p0().single_mut() {
+    if let Ok(mut strip) = texts.p0().single_mut() {
         if !player.alive {
-            text.0 = "VEHICLE DESTROYED\nSPECTATING BATTLE\nPress Enter to Restart".to_string();
+            strip.0 = "DESTROYED | Enter: Restart | H: Hangar".to_string();
         } else {
-            let gun_str = if !mods.can_fire {
-                if !player.damage.has_active_seat(CrewRole::Gunner) {
-                    "NO GUNNER".to_string()
-                } else {
-                    "GUN DISABLED".to_string()
-                }
-            } else if tank.is_loaded() {
-                "READY".to_string()
-            } else {
-                format!("RELOAD {:.1}s", tank.reload_remaining * mods.reload_time_scale)
-            };
             let view_str = match cam_ctrl.mode {
-                CameraMode::ThirdPerson if cam_ctrl.free_look => "FREE LOOK",
-                CameraMode::ThirdPerson => "3RD PERSON",
-                CameraMode::Sniper => "GUNNER OPTIC",
+                CameraMode::ThirdPerson if cam_ctrl.free_look => "FREE",
+                CameraMode::ThirdPerson => "3RD",
+                CameraMode::Sniper => "OPTIC",
             };
-            let turret_deg = tank.turret_yaw_local.to_degrees();
-            let elev_deg = tank.gun_pitch_local.to_degrees();
-            let slope_deg = tank.hull_pitch.to_degrees();
             let ford_tag = if tank.is_on_water(&sim.0.voxels) {
                 " [FORD]"
             } else {
                 ""
             };
-            let sh = &tank.config.shell;
-            text.0 = format!(
-                "SPD {:>3.0} km/h | GEAR {}{}\nALT {:>+4.1}m | SLOPE {:>+4.1} deg\nTUR {:>+4.0} deg | ELV {:>+4.1} deg\nSHELL {} ({:.0}mm)\nGUN {} | {}",
-                tank.speed_kmh().abs(),
+            strip.0 = format!(
+                "GEAR {} | {:>2.0} km/h{} | SLP {:>+3.0} | TUR {:>+4.0} | {}",
                 tank.gear_label(),
+                tank.speed_kmh().abs(),
                 ford_tag,
-                tank.position.y,
-                slope_deg,
-                turret_deg,
-                elev_deg,
-                sh.name,
-                sh.penetration_0m_mm,
-                gun_str,
+                tank.hull_pitch.to_degrees(),
+                tank.turret_yaw_local.to_degrees(),
                 view_str,
             );
         }
@@ -961,14 +1162,39 @@ fn update_hud_telemetry(
 
     if let Ok((mut hint, mut color)) = texts.p1().single_mut() {
         if player.damage.on_fire && player.alive {
-            hint.0 = "!! ENGINE / FUEL FIRE !!" .to_string();
+            hint.0 = "!! ENGINE / FUEL FIRE !!".to_string();
             color.0 = Color::srgb(1.0, 0.35, 0.20);
         } else if cam_ctrl.cursor_locked {
-            hint.0 = "Mouse locked (press Esc to unlock cursor)".to_string();
+            hint.0 = "Aim locked | Esc: Unlock cursor / Hangar".to_string();
             color.0 = Color::srgb(0.68, 0.88, 0.72);
         } else {
-            hint.0 = "Click window to lock mouse aiming".to_string();
-            color.0 = Color::srgb(0.95, 0.68, 0.25);
+            hint.0 = "Click to lock aim | Esc: Unlock cursor".to_string();
+            color.0 = Color::srgb(0.95, 0.70, 0.28);
+        }
+    }
+
+    if let Ok(mut label) = texts.p2().single_mut() {
+        let sh = &tank.config.shell;
+        label.0 = format!("[1] {} ({:.0}mm)", sh.name, sh.penetration_0m_mm);
+    }
+
+    if let Ok((mut status, mut col)) = texts.p3().single_mut() {
+        if !player.alive {
+            status.0 = "OUT".to_string();
+            col.0 = Color::srgb(0.95, 0.32, 0.28);
+        } else if !mods.can_fire {
+            status.0 = if !player.damage.has_active_seat(CrewRole::Gunner) {
+                "NO GUNNER".to_string()
+            } else {
+                "DISABLED".to_string()
+            };
+            col.0 = Color::srgb(0.98, 0.36, 0.30);
+        } else if tank.is_loaded() {
+            status.0 = "READY".to_string();
+            col.0 = Color::srgb(0.32, 0.94, 0.42);
+        } else {
+            status.0 = format!("{:.1}s", tank.reload_remaining * mods.reload_time_scale);
+            col.0 = Color::srgb(0.98, 0.74, 0.24);
         }
     }
 
@@ -988,8 +1214,9 @@ fn update_hud_telemetry(
 fn update_player_damage_diagram(
     sim: Res<SimResource>,
     mut q: ParamSet<(
+        Query<(&mut Node, &mut Text), With<DamageAlertBanner>>,
         Query<(&mut Text, &mut TextColor), With<DamageHeaderText>>,
-        Query<(&CrewSeatChip, &mut BackgroundColor, &mut BorderColor, &mut TextColor)>,
+        Query<(&CrewSeatChip, &mut Node, &mut BackgroundColor, &mut BorderColor, &mut TextColor)>,
         Query<(&ModuleChip, &mut BackgroundColor, &mut BorderColor, &mut TextColor)>,
     )>,
 ) {
@@ -998,7 +1225,36 @@ fn update_player_damage_diagram(
     let alive_crew = dmg.alive_crew_count();
     let total_crew = dmg.total_crew_count();
 
-    if let Ok((mut header, mut color)) = q.p0().single_mut() {
+    // Dynamic floating damage warning banner above schematic
+    if let Ok((mut banner_node, mut banner_text)) = q.p0().single_mut() {
+        let alert = if !player.alive {
+            None
+        } else if dmg.on_fire {
+            Some("!! FIRE IN ENGINE / FUEL COMPARTMENT !!")
+        } else if dmg.module_worst_health(ModuleKind::GunBreech) == ModuleHealth::Destroyed
+            || dmg.module_worst_health(ModuleKind::GunBarrel) == ModuleHealth::Destroyed
+        {
+            Some("! MAIN GUN DISABLED !")
+        } else if dmg.module_worst_health(ModuleKind::LeftTrack) == ModuleHealth::Destroyed
+            || dmg.module_worst_health(ModuleKind::RightTrack) == ModuleHealth::Destroyed
+        {
+            Some("! TRACK BROKEN !")
+        } else if dmg.module_worst_health(ModuleKind::Engine) == ModuleHealth::Destroyed
+            || dmg.module_worst_health(ModuleKind::Transmission) == ModuleHealth::Destroyed
+        {
+            Some("! MOBILITY DISABLED !")
+        } else {
+            None
+        };
+        if let Some(msg) = alert {
+            banner_node.display = Display::Flex;
+            banner_text.0 = msg.to_string();
+        } else {
+            banner_node.display = Display::None;
+        }
+    }
+
+    if let Ok((mut header, mut color)) = q.p1().single_mut() {
         if !player.alive {
             header.0 = if dmg.turret_blown_off {
                 "AMMO RACK DETONATED".to_string()
@@ -1038,7 +1294,15 @@ fn update_player_damage_diagram(
         }
     }
 
-    for (chip, mut bg, mut border, mut tc) in &mut q.p1() {
+    for (chip, mut node, mut bg, mut border, mut tc) in &mut q.p2() {
+        // Hide seats not present on 3-crew / 4-crew tanks (e.g. RadioOperator on IS-2 / IS-3 / BT-5)
+        let seat_exists = dmg.crew.iter().any(|c| c.role == chip.0);
+        if !seat_exists {
+            node.display = Display::None;
+            continue;
+        }
+        node.display = Display::Flex;
+
         let manned = dmg.has_active_seat(chip.0);
         let replacing = (chip.0 == CrewRole::Driver && dmg.driver_transfer_timer > 0.0)
             || (chip.0 == CrewRole::Gunner && dmg.gunner_transfer_timer > 0.0);
@@ -1057,11 +1321,11 @@ fn update_player_damage_diagram(
         }
     }
 
-    for (chip, mut bg, mut border, mut tc) in &mut q.p2() {
+    for (chip, mut bg, mut border, mut tc) in &mut q.p3() {
         match dmg.module_worst_health(chip.0) {
             ModuleHealth::Intact => {
-                bg.0 = Color::srgba(0.20, 0.23, 0.21, 0.88);
-                *border = BorderColor::all(Color::srgba(0.50, 0.54, 0.50, 0.75));
+                bg.0 = Color::srgba(0.18, 0.21, 0.20, 0.86);
+                *border = BorderColor::all(Color::srgba(0.50, 0.54, 0.50, 0.72));
                 tc.0 = Color::srgb(0.84, 0.87, 0.84);
             }
             ModuleHealth::Damaged => {
@@ -1277,16 +1541,17 @@ fn update_battle_scoreboard(
         let secs = battle.battle_time as u32;
         if !player.alive && !battle.is_over() {
             text.0 = format!(
-                "{:02}:{:02} | TANK DESTROYED - SPECTATING | PRESS ENTER TO RESTART",
+                "{:02}:{:02} | DESTROYED - SPECTATING | Enter: Restart | H: Hangar",
                 secs / 60,
                 secs % 60
             );
             color.0 = Color::srgb(0.98, 0.45, 0.38);
         } else {
             text.0 = format!(
-                "{:02}:{:02} | KILLS {} | PENS {}",
+                "{:02}:{:02} | TIER {} BATTLE | KILLS {} | PENS {}",
                 secs / 60,
                 secs % 60,
+                tier_roman(player.state.config.tier),
                 player.kills,
                 player.hits_landed,
             );
@@ -1319,10 +1584,8 @@ fn update_kill_feed(
         };
         feed.entries.push(KillFeedEntry {
             line: format!(
-                "[{}] {} > [{}] {} ({})",
-                k.killer_team.label(),
+                "{} > {} ({})",
                 k.killer_name,
-                k.victim_team.label(),
                 k.victim_name,
                 k.reason.short_label(),
             ),
@@ -1389,18 +1652,18 @@ fn update_overhead_markers(
         };
 
         node.display = Display::Flex;
-        node.left = Val::Px(screen.x - 38.0);
+        node.left = Val::Px(screen.x - 42.0);
         node.top = Val::Px(screen.y - 16.0);
 
         let fire_tag = if unit.damage.on_fire { " [FIRE]" } else { "" };
         if unit.team == Team::Allies {
             *border = BorderColor::all(Color::srgba(0.35, 0.72, 1.0, 0.85));
             color.0 = Color::srgb(0.62, 0.86, 1.0);
-            text.0 = format!("{} {:.0}m{}", unit.name, dist, fire_tag);
+            text.0 = format!("{} {:.0}m{}", unit.state.config.name, dist, fire_tag);
         } else {
             *border = BorderColor::all(Color::srgba(0.95, 0.32, 0.28, 0.90));
             color.0 = Color::srgb(1.0, 0.54, 0.48);
-            text.0 = format!("{} {:.0}m{}", unit.name, dist, fire_tag);
+            text.0 = format!("{} {:.0}m{}", unit.state.config.name, dist, fire_tag);
         }
     }
 }
@@ -1479,9 +1742,10 @@ fn update_hud_minimap(
     }
 }
 
-#[allow(clippy::type_complexity)]
-fn update_battle_end_modal(
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn update_battle_end_modal_and_buttons(
     sim: Res<SimResource>,
+    cam_ctrl: Res<TankCameraController>,
     mouse_buttons: Res<ButtonInput<MouseButton>>,
     window_q: Query<&Window, With<PrimaryWindow>>,
     mut control: ResMut<BattleControlResource>,
@@ -1490,44 +1754,52 @@ fn update_battle_end_modal(
         Query<(&mut Text, &mut TextColor), With<BattleEndTitleText>>,
         Query<&mut Text, With<BattleEndStatsText>>,
     )>,
-    mut btn_q: Query<(&ComputedNode, &UiGlobalTransform, &mut BackgroundColor), With<PlayAgainButton>>,
+    mut btn_q: Query<(
+        &HudButtonAction,
+        &ComputedNode,
+        &UiGlobalTransform,
+        &mut BackgroundColor,
+    )>,
 ) {
     let battle = &sim.0.battle;
-    let Ok(mut overlay) = overlay_q.single_mut() else {
-        return;
-    };
+    let battle_over = battle.is_over();
 
-    if !battle.is_over() {
-        overlay.display = Display::None;
-        return;
+    if let Ok(mut overlay) = overlay_q.single_mut() {
+        overlay.display = if battle_over {
+            Display::Flex
+        } else {
+            Display::None
+        };
     }
 
-    overlay.display = Display::Flex;
+    if battle_over {
+        let (title, title_color) = match battle.outcome {
+            BattleOutcome::Victory(Team::Allies) => ("VICTORY", Color::srgb(0.45, 0.78, 1.0)),
+            BattleOutcome::Victory(Team::Axis) => ("DEFEAT", Color::srgb(0.98, 0.36, 0.34)),
+            BattleOutcome::Draw => ("DRAW", Color::srgb(0.92, 0.84, 0.42)),
+            BattleOutcome::Ongoing => ("", Color::WHITE),
+        };
 
-    let (title, title_color) = match battle.outcome {
-        BattleOutcome::Victory(Team::Allies) => ("VICTORY", Color::srgb(0.45, 0.78, 1.0)),
-        BattleOutcome::Victory(Team::Axis) => ("DEFEAT", Color::srgb(0.98, 0.36, 0.34)),
-        BattleOutcome::Draw => ("DRAW", Color::srgb(0.92, 0.84, 0.42)),
-        BattleOutcome::Ongoing => ("", Color::WHITE),
-    };
+        if let Ok((mut t, mut c)) = texts.p0().single_mut() {
+            t.0 = title.to_string();
+            c.0 = title_color;
+        }
 
-    if let Ok((mut t, mut c)) = texts.p0().single_mut() {
-        t.0 = title.to_string();
-        c.0 = title_color;
-    }
-
-    if let Ok(mut stats) = texts.p1().single_mut() {
-        let player = sim.0.player_unit();
-        let secs = battle.battle_time as u32;
-        stats.0 = format!(
-            "ALLIES {:.0}  -  {:.0} AXIS\nBATTLE TIME {:02}:{:02}\nYOUR KILLS: {}  |  PENETRATIONS: {}",
-            battle.allies_tickets.ceil(),
-            battle.axis_tickets.ceil(),
-            secs / 60,
-            secs % 60,
-            player.kills,
-            player.hits_landed,
-        );
+        if let Ok(mut stats) = texts.p1().single_mut() {
+            let player = sim.0.player_unit();
+            let secs = battle.battle_time as u32;
+            stats.0 = format!(
+                "{}  (TIER {})\nALLIES {:.0}  -  {:.0} AXIS\nBATTLE TIME {:02}:{:02}\nYOUR KILLS: {}  |  PENETRATIONS: {}",
+                player.state.config.name,
+                tier_roman(player.state.config.tier),
+                battle.allies_tickets.ceil(),
+                battle.axis_tickets.ceil(),
+                secs / 60,
+                secs % 60,
+                player.kills,
+                player.hits_landed,
+            );
+        }
     }
 
     let cursor_phys = window_q
@@ -1536,16 +1808,43 @@ fn update_battle_end_modal(
         .and_then(|w| w.physical_cursor_position());
     let clicked = mouse_buttons.just_pressed(MouseButton::Left);
 
-    for (computed, ui_gtf, mut bg) in &mut btn_q {
-        let hovered = cursor_phys.is_some_and(|p| computed.contains_point(*ui_gtf, p));
+    for (action, computed, ui_gtf, mut bg) in &mut btn_q {
+        let interactive = match action {
+            HudButtonAction::PlayAgain | HudButtonAction::ToHangar => battle_over,
+            HudButtonAction::TopHangarShortcut => !cam_ctrl.cursor_locked,
+        };
+        let hovered = interactive && cursor_phys.is_some_and(|p| computed.contains_point(*ui_gtf, p));
         if hovered && clicked {
-            bg.0 = Color::srgb(0.26, 0.52, 0.28);
-            control.restart_requested = true;
-        } else if hovered {
-            bg.0 = Color::srgb(0.24, 0.44, 0.26);
-        } else {
-            bg.0 = Color::srgb(0.18, 0.34, 0.20);
+            match action {
+                HudButtonAction::PlayAgain => control.restart_requested = true,
+                HudButtonAction::ToHangar | HudButtonAction::TopHangarShortcut => {
+                    control.return_to_hangar = true;
+                }
+            }
         }
+        bg.0 = match action {
+            HudButtonAction::PlayAgain => {
+                if hovered {
+                    Color::srgb(0.95, 0.37, 0.16)
+                } else {
+                    Color::srgb(0.83, 0.29, 0.11)
+                }
+            }
+            HudButtonAction::ToHangar => {
+                if hovered {
+                    Color::srgb(0.16, 0.52, 0.70)
+                } else {
+                    Color::srgb(0.11, 0.40, 0.56)
+                }
+            }
+            HudButtonAction::TopHangarShortcut => {
+                if hovered {
+                    Color::srgba(0.18, 0.26, 0.34, 0.92)
+                } else {
+                    Color::srgba(0.10, 0.14, 0.18, 0.82)
+                }
+            }
+        };
     }
 }
 

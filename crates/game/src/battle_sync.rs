@@ -1,37 +1,50 @@
 use bevy::prelude::*;
-use sim::{FIXED_DT, SimWorld, TankConfig, generate_european_valley_map};
-use voxel::build_basic_tank_models;
+use sim::{FIXED_DT, SimWorld, VehicleCatalog, generate_european_valley_map};
 
 use crate::bridge::{BattleControlResource, PendingSimEvents, PlayerInputResource, SimResource};
-use crate::tank_view::TankModelsResource;
+use crate::state::{AppState, CatalogResource, SelectedVehicle};
 
-/// Headless-compatible simulation plugin (runs with `MinimalPlugins` for automated tests).
+/// Headless-compatible simulation plugin (runs with `MinimalPlugins` + `StatesPlugin` for automated tests).
 pub struct BattleSimPlugin;
 
 impl Plugin for BattleSimPlugin {
     fn build(&self, app: &mut App) {
-        let models = build_basic_tank_models();
-        let tank_cfg = TankConfig::stage1_basic(&models);
+        let catalog = VehicleCatalog::stage5_catalog();
+        let selected = SelectedVehicle::default();
         let (world, metadata) = generate_european_valley_map();
-        let sim = SimWorld::new_team_battle(world, metadata, tank_cfg, 6);
+        let sim = SimWorld::new_tier_battle(world, metadata, &catalog, &selected.vehicle_id, 6);
 
         app.insert_resource(Time::<Fixed>::from_hz(60.0))
-            .insert_resource(TankModelsResource(models))
+            .insert_resource(CatalogResource(catalog))
+            .insert_resource(selected)
             .insert_resource(SimResource(sim))
             .init_resource::<PlayerInputResource>()
             .init_resource::<BattleControlResource>()
             .init_resource::<PendingSimEvents>()
-            .add_systems(FixedUpdate, step_simulation)
-            .add_systems(PostUpdate, clear_pending_sim_events);
+            .add_systems(
+                FixedUpdate,
+                step_simulation.run_if(in_state(AppState::InBattle)),
+            )
+            .add_systems(
+                Update,
+                handle_return_to_hangar.run_if(in_state(AppState::InBattle)),
+            )
+            .add_systems(
+                PostUpdate,
+                clear_pending_sim_events.run_if(in_state(AppState::InBattle)),
+            );
     }
 }
 
-/// Interactive keyboard/mouse input plugin for driving, firing, and restarting after battle end.
+/// Interactive keyboard/mouse input plugin for driving, firing, restarting, and returning to Hangar.
 pub struct PlayerInputPlugin;
 
 impl Plugin for PlayerInputPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, gather_player_driving_and_fire_input);
+        app.add_systems(
+            Update,
+            gather_player_driving_and_fire_input.run_if(in_state(AppState::InBattle)),
+        );
     }
 }
 
@@ -47,6 +60,9 @@ fn gather_player_driving_and_fire_input(
 
     if (battle_over || !player_alive) && keys.just_pressed(KeyCode::Enter) {
         control.restart_requested = true;
+    }
+    if (battle_over || !player_alive) && keys.just_pressed(KeyCode::KeyH) {
+        control.return_to_hangar = true;
     }
 
     if battle_over || !player_alive {
@@ -77,6 +93,21 @@ fn gather_player_driving_and_fire_input(
 
     if mouse_buttons.just_pressed(MouseButton::Left) || keys.just_pressed(KeyCode::Space) {
         input.fire_queued = true;
+    }
+}
+
+fn handle_return_to_hangar(
+    mut control: ResMut<BattleControlResource>,
+    mut events: ResMut<PendingSimEvents>,
+    mut selected: ResMut<SelectedVehicle>,
+    mut next_state: ResMut<NextState<AppState>>,
+) {
+    if control.return_to_hangar {
+        control.return_to_hangar = false;
+        control.restart_requested = false;
+        events.clear_frame_events();
+        selected.preview_dirty = true;
+        next_state.set(AppState::Hangar);
     }
 }
 

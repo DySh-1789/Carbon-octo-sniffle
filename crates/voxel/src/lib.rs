@@ -8,7 +8,10 @@ pub use chunk::{CHUNK_SIZE, CHUNK_SIZE_I32, TANK_VOXEL_SIZE, VoxelChunk, VoxelWo
 pub use glam;
 pub use material::{MaterialRegistry, VoxelId, VoxelMaterial};
 pub use mesher::{VoxelMeshData, mesh_voxel_model, mesh_world_chunk};
-pub use model::{TankVoxelModels, VoxelModel, build_basic_tank_models};
+pub use model::{
+    HullFrontStyle, MuzzleBrakeStyle, TankVoxelModels, TurretStyle, VoxelModel,
+    VoxelTankBlueprint, build_basic_tank_models, build_tank_models,
+};
 pub use raycast::{VoxelHit, raycast_world};
 
 #[cfg(test)]

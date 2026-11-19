@@ -11,6 +11,7 @@ use voxel::raycast_world;
 use crate::bridge::{
     PendingSimEvents, PlayerInputResource, SimResource, to_bevy_quat, to_bevy_vec3, to_sim_vec3,
 };
+use crate::state::{AppState, BattleEntity};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum CameraMode {
@@ -60,8 +61,14 @@ impl Plugin for CameraPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(DirectionalLightShadowMap { size: 1024 })
             .init_resource::<TankCameraController>()
-            .add_systems(Startup, setup_scene_lighting_and_camera)
-            .add_systems(Update, (handle_camera_controls, update_camera_and_aim).chain());
+            .add_systems(OnEnter(AppState::InBattle), setup_scene_lighting_and_camera)
+            .add_systems(OnExit(AppState::InBattle), unlock_cursor_on_battle_exit)
+            .add_systems(
+                Update,
+                (handle_camera_controls, update_camera_and_aim)
+                    .chain()
+                    .run_if(in_state(AppState::InBattle)),
+            );
     }
 }
 
@@ -72,6 +79,10 @@ fn setup_scene_lighting_and_camera(
 ) {
     // Align initial camera orbit direction with the player tank's spawn heading
     cam_ctrl.yaw = sim.0.player_tank().hull_yaw;
+    cam_ctrl.pitch = -0.18;
+    cam_ctrl.mode = CameraMode::ThirdPerson;
+    cam_ctrl.free_look = false;
+    cam_ctrl.cursor_locked = false;
 
     // Warm sunlit European valley sky matching horizon fog
     commands.insert_resource(ClearColor(Color::srgb(0.62, 0.76, 0.88)));
@@ -86,6 +97,7 @@ fn setup_scene_lighting_and_camera(
     // Primary afternoon sun directional light with memory-efficient 2-cascade 1024px shadow maps
     // (~8 MB vs Bevy's default 64 MB 4-cascade 2048px shadows)
     commands.spawn((
+        BattleEntity,
         DirectionalLight {
             illuminance: 15_500.0,
             shadow_maps_enabled: true,
@@ -106,6 +118,7 @@ fn setup_scene_lighting_and_camera(
 
     // Main 3D tank camera (`Msaa::Off` eliminates heavy 4x multisampled render targets)
     commands.spawn((
+        BattleEntity,
         MainTankCamera,
         Camera3d::default(),
         Msaa::Off,
@@ -127,6 +140,18 @@ fn setup_scene_lighting_and_camera(
         Transform::from_translation(spawn_pos + Vec3::new(0.0, 5.5, 11.5))
             .looking_at(spawn_pos + Vec3::new(0.0, 1.8, 0.0), Vec3::Y),
     ));
+}
+
+fn unlock_cursor_on_battle_exit(
+    mut cam_ctrl: ResMut<TankCameraController>,
+    mut cursor_q: Query<&mut CursorOptions, With<PrimaryWindow>>,
+) {
+    cam_ctrl.cursor_locked = false;
+    cam_ctrl.free_look = false;
+    if let Ok(mut cursor) = cursor_q.single_mut() {
+        cursor.grab_mode = CursorGrabMode::None;
+        cursor.visible = true;
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

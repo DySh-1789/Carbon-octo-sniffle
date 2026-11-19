@@ -5,6 +5,7 @@ use sim::{HitOutcome, KillReason};
 
 use crate::bridge::{PendingSimEvents, SimResource, to_bevy_vec3};
 use crate::camera::MainTankCamera;
+use crate::state::AppState;
 
 /// Maximum camera distance for spawning dynamic transient `PointLight`s (keeps WebGL2/WGPU light clusters lean).
 const MAX_DYNAMIC_LIGHT_DIST_SQ: f32 = 95.0 * 95.0;
@@ -56,6 +57,7 @@ impl Plugin for EffectsPlugin {
         app.init_resource::<TracerEntities>()
             .init_resource::<FireEmitTimer>()
             .add_systems(Startup, setup_effects_assets)
+            .add_systems(OnExit(AppState::InBattle), clear_effects_on_exit)
             .add_systems(
                 Update,
                 (
@@ -65,9 +67,29 @@ impl Plugin for EffectsPlugin {
                     emit_active_tank_fire_effects,
                     tick_transient_effects,
                 )
-                    .chain(),
+                    .chain()
+                    .run_if(in_state(AppState::InBattle)),
             );
     }
+}
+
+fn clear_effects_on_exit(
+    mut commands: Commands,
+    mut tracers: ResMut<TracerEntities>,
+    mut fire_timer: ResMut<FireEmitTimer>,
+    particle_q: Query<Entity, With<TransientParticle>>,
+    light_q: Query<Entity, With<TransientLight>>,
+) {
+    for (_, entity) in tracers.map.drain() {
+        commands.entity(entity).despawn();
+    }
+    for entity in &particle_q {
+        commands.entity(entity).despawn();
+    }
+    for entity in &light_q {
+        commands.entity(entity).despawn();
+    }
+    fire_timer.accum = 0.0;
 }
 
 fn setup_effects_assets(
