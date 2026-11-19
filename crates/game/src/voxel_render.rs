@@ -79,7 +79,7 @@ fn build_initial_world_chunks(
     material: Res<WorldVoxelMaterial>,
     mut registry: ResMut<ChunkMeshEntities>,
 ) {
-    let focus = sim.0.player_tank.position;
+    let focus = sim.0.player_tank().position;
     let dirty = sim
         .0
         .voxels
@@ -97,7 +97,7 @@ fn sync_dirty_world_chunks(
     if sim.0.voxels.dirty_chunk_count() == 0 {
         return;
     }
-    let focus = sim.0.player_tank.position;
+    let focus = sim.0.player_tank().position;
     let dirty = sim
         .0
         .voxels

@@ -3,6 +3,10 @@ use std::collections::HashMap;
 use bevy::prelude::*;
 
 use crate::bridge::{PendingSimEvents, SimResource, to_bevy_vec3};
+use crate::camera::MainTankCamera;
+
+/// Maximum camera distance for spawning dynamic transient `PointLight`s (keeps WebGL2/WGPU light clusters lean).
+const MAX_DYNAMIC_LIGHT_DIST_SQ: f32 = 95.0 * 95.0;
 
 #[derive(Resource)]
 struct EffectsAssets {
@@ -11,6 +15,7 @@ struct EffectsAssets {
     puff_mesh: Handle<Mesh>,
     flash_mat: Handle<StandardMaterial>,
     smoke_mat: Handle<StandardMaterial>,
+    wreck_smoke_mat: Handle<StandardMaterial>,
     dirt_mat: Handle<StandardMaterial>,
 }
 
@@ -45,10 +50,12 @@ impl Plugin for EffectsPlugin {
             .add_systems(
                 Update,
                 (
+                    clear_effects_on_restart,
                     sync_projectile_tracers,
                     spawn_shot_and_impact_effects,
                     tick_transient_effects,
-                ),
+                )
+                    .chain(),
             );
     }
 }
@@ -77,6 +84,11 @@ fn setup_effects_assets(
         perceptual_roughness: 1.0,
         ..default()
     });
+    let wreck_smoke_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.22, 0.21, 0.20),
+        perceptual_roughness: 1.0,
+        ..default()
+    });
     let dirt_mat = materials.add(StandardMaterial {
         base_color: Color::srgb(0.38, 0.29, 0.20),
         perceptual_roughness: 0.95,
@@ -89,8 +101,30 @@ fn setup_effects_assets(
         puff_mesh,
         flash_mat,
         smoke_mat,
+        wreck_smoke_mat,
         dirt_mat,
     });
+}
+
+fn clear_effects_on_restart(
+    mut commands: Commands,
+    pending: Res<PendingSimEvents>,
+    mut tracers: ResMut<TracerEntities>,
+    particle_q: Query<Entity, With<TransientParticle>>,
+    light_q: Query<Entity, With<TransientLight>>,
+) {
+    if !pending.battle_restarted {
+        return;
+    }
+    for (_, entity) in tracers.map.drain() {
+        commands.entity(entity).despawn();
+    }
+    for entity in &particle_q {
+        commands.entity(entity).despawn();
+    }
+    for entity in &light_q {
+        commands.entity(entity).despawn();
+    }
 }
 
 fn sync_projectile_tracers(
@@ -102,7 +136,6 @@ fn sync_projectile_tracers(
 ) {
     let active_ids: Vec<u64> = sim.0.projectiles.iter().map(|p| p.id).collect();
 
-    // Despawn tracers for projectiles that impacted or expired
     tracers.map.retain(|id, entity| {
         if active_ids.contains(id) {
             true
@@ -112,7 +145,6 @@ fn sync_projectile_tracers(
         }
     });
 
-    // Spawn or update active tracers aligned with flight direction
     for proj in &sim.0.projectiles {
         let pos = to_bevy_vec3(proj.position);
         let dir = to_bevy_vec3(proj.velocity).normalize_or_zero();
@@ -144,28 +176,33 @@ fn spawn_shot_and_impact_effects(
     mut commands: Commands,
     mut pending: ResMut<PendingSimEvents>,
     assets: Res<EffectsAssets>,
+    cam_q: Query<&Transform, With<MainTankCamera>>,
 ) {
-    // Muzzle flash + smoke puffs on firing
+    let cam_pos = cam_q.single().ok().map(|tf| tf.translation);
+    let near_cam = |pos: Vec3| cam_pos.is_some_and(|c| c.distance_squared(pos) < MAX_DYNAMIC_LIGHT_DIST_SQ);
+
+    // 1. Muzzle flash + smoke puffs on firing (player & bots)
     for shot in pending.fired_shots.drain(..) {
         let muzzle = to_bevy_vec3(shot.muzzle_position);
         let dir = to_bevy_vec3(shot.direction);
 
-        commands.spawn((
-            PointLight {
-                color: Color::srgb(1.0, 0.72, 0.25),
-                intensity: 350_000.0,
-                range: 18.0,
-                ..default()
-            },
-            Transform::from_translation(muzzle + dir * 0.4),
-            TransientLight {
-                age: 0.0,
-                lifetime: 0.11,
-                start_intensity: 350_000.0,
-            },
-        ));
+        if near_cam(muzzle) {
+            commands.spawn((
+                PointLight {
+                    color: Color::srgb(1.0, 0.72, 0.25),
+                    intensity: 350_000.0,
+                    range: 18.0,
+                    ..default()
+                },
+                Transform::from_translation(muzzle + dir * 0.4),
+                TransientLight {
+                    age: 0.0,
+                    lifetime: 0.11,
+                    start_intensity: 350_000.0,
+                },
+            ));
+        }
 
-        // Bright muzzle blast cube
         commands.spawn((
             Mesh3d(assets.puff_mesh.clone()),
             MeshMaterial3d(assets.flash_mat.clone()),
@@ -180,7 +217,6 @@ fn spawn_shot_and_impact_effects(
             },
         ));
 
-        // Expanding voxel gunpowder smoke clouds
         for i in 0..6 {
             let angle = i as f32 * std::f32::consts::TAU / 6.0;
             let side = Vec3::new(angle.cos(), 0.35 + (i % 2) as f32 * 0.25, angle.sin());
@@ -200,7 +236,7 @@ fn spawn_shot_and_impact_effects(
         }
     }
 
-    // Impact voxel dust / flash burst when shell strikes ground
+    // 2. Impact voxel dust / flash burst when shell strikes terrain or buildings
     for impact in pending.impacts.drain(..) {
         let pos = to_bevy_vec3(impact.position);
         let normal = to_bevy_vec3(impact.normal).normalize_or_zero();
@@ -210,22 +246,23 @@ fn spawn_shot_and_impact_effects(
             Vec3::Y
         };
 
-        commands.spawn((
-            PointLight {
-                color: Color::srgb(1.0, 0.6, 0.2),
-                intensity: 280_000.0,
-                range: 14.0,
-                ..default()
-            },
-            Transform::from_translation(pos + up * 0.6),
-            TransientLight {
-                age: 0.0,
-                lifetime: 0.16,
-                start_intensity: 280_000.0,
-            },
-        ));
+        if near_cam(pos) {
+            commands.spawn((
+                PointLight {
+                    color: Color::srgb(1.0, 0.6, 0.2),
+                    intensity: 280_000.0,
+                    range: 14.0,
+                    ..default()
+                },
+                Transform::from_translation(pos + up * 0.6),
+                TransientLight {
+                    age: 0.0,
+                    lifetime: 0.16,
+                    start_intensity: 280_000.0,
+                },
+            ));
+        }
 
-        // Central impact flash
         commands.spawn((
             Mesh3d(assets.puff_mesh.clone()),
             MeshMaterial3d(assets.flash_mat.clone()),
@@ -240,9 +277,8 @@ fn spawn_shot_and_impact_effects(
             },
         ));
 
-        // Flying voxel debris & rising dust column oriented along hit normal (ground or building wall)
-        for i in 0..10 {
-            let angle = i as f32 * std::f32::consts::TAU / 10.0;
+        for i in 0..8 {
+            let angle = i as f32 * std::f32::consts::TAU / 8.0;
             let spread = 2.4 + (i % 3) as f32 * 1.4;
             let vel = up * (4.2 + (i % 4) as f32 * 1.8)
                 + Vec3::new(angle.cos() * spread, 1.5, angle.sin() * spread);
@@ -264,6 +300,95 @@ fn spawn_shot_and_impact_effects(
                     end_scale: if is_smoke { 1.6 } else { 0.08 },
                 },
             ));
+        }
+    }
+
+    // 3. Direct tank armor hits (sparks) & vehicle knockouts (fireball + billowing smoke plume)
+    for hit in pending.tank_hits.drain(..) {
+        let pos = to_bevy_vec3(hit.position);
+        let normal = to_bevy_vec3(hit.normal).normalize_or_zero();
+        let up = if normal.length_squared() > 0.1 {
+            normal
+        } else {
+            Vec3::Y
+        };
+
+        if near_cam(pos) {
+            commands.spawn((
+                PointLight {
+                    color: Color::srgb(1.0, 0.55, 0.15),
+                    intensity: if hit.destroyed { 650_000.0 } else { 320_000.0 },
+                    range: if hit.destroyed { 22.0 } else { 12.0 },
+                    ..default()
+                },
+                Transform::from_translation(pos + Vec3::Y * 0.8),
+                TransientLight {
+                    age: 0.0,
+                    lifetime: if hit.destroyed { 0.45 } else { 0.14 },
+                    start_intensity: if hit.destroyed { 650_000.0 } else { 320_000.0 },
+                },
+            ));
+        }
+
+        // Hit spark / blast flash
+        commands.spawn((
+            Mesh3d(assets.puff_mesh.clone()),
+            MeshMaterial3d(assets.flash_mat.clone()),
+            Transform::from_translation(pos + up * 0.25)
+                .with_scale(Vec3::splat(if hit.destroyed { 1.65 } else { 0.8 })),
+            TransientParticle {
+                velocity: Vec3::Y * if hit.destroyed { 2.5 } else { 0.6 },
+                gravity: 0.0,
+                age: 0.0,
+                lifetime: if hit.destroyed { 0.36 } else { 0.14 },
+                start_scale: if hit.destroyed { 1.75 } else { 0.85 },
+                end_scale: 0.1,
+            },
+        ));
+
+        // Metallic armor sparks flying along hit normal
+        for i in 0..6 {
+            let angle = i as f32 * std::f32::consts::TAU / 6.0;
+            let vel = up * (6.0 + (i % 3) as f32 * 2.5)
+                + Vec3::new(angle.cos() * 3.5, 2.0, angle.sin() * 3.5);
+            commands.spawn((
+                Mesh3d(assets.puff_mesh.clone()),
+                MeshMaterial3d(assets.flash_mat.clone()),
+                Transform::from_translation(pos).with_scale(Vec3::splat(0.18)),
+                TransientParticle {
+                    velocity: vel,
+                    gravity: 12.0,
+                    age: 0.0,
+                    lifetime: 0.35 + (i % 2) as f32 * 0.12,
+                    start_scale: 0.20,
+                    end_scale: 0.02,
+                },
+            ));
+        }
+
+        // Tall dark-smoke plume on knockout
+        if hit.destroyed {
+            for i in 0..12 {
+                let angle = i as f32 * std::f32::consts::TAU / 12.0;
+                let spread = 1.1 + (i % 3) as f32 * 0.6;
+                commands.spawn((
+                    Mesh3d(assets.puff_mesh.clone()),
+                    MeshMaterial3d(assets.wreck_smoke_mat.clone()),
+                    Transform::from_translation(pos + Vec3::Y * 0.5).with_scale(Vec3::splat(0.6)),
+                    TransientParticle {
+                        velocity: Vec3::new(
+                            angle.cos() * spread,
+                            3.6 + (i % 4) as f32 * 1.4,
+                            angle.sin() * spread,
+                        ),
+                        gravity: -0.6,
+                        age: 0.0,
+                        lifetime: 1.6 + (i % 5) as f32 * 0.35,
+                        start_scale: 0.55,
+                        end_scale: 2.8,
+                    },
+                ));
+            }
         }
     }
 }

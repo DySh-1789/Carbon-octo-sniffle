@@ -452,7 +452,7 @@ impl TankState {
 
     /// Counts how many oriented hull-perimeter probes intersect solid obstacles `>= 2` voxels
     /// (`> 0.65 m`) above local track clearance, such as buildings, rocks, walls, tree trunks, or cliffs.
-    fn count_hull_collisions(&self, world: &VoxelWorld, cx: f32, cz: f32, yaw: f32) -> usize {
+    pub fn count_hull_collisions(&self, world: &VoxelWorld, cx: f32, cz: f32, yaw: f32) -> usize {
         let hw = self.config.hull_half_width;
         let hl = self.config.hull_half_length;
         let sin_y = yaw.sin();

@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use sim::{FiredShot, ImpactEvent, SimWorld, TankInput};
+use sim::{FiredShot, ImpactEvent, KillEvent, SimWorld, TankHitEvent, TankInput};
 use voxel::glam;
 
 /// Converts a `voxel`/`sim` `Vec3` into Bevy's `Vec3`.
@@ -47,9 +47,18 @@ impl PlayerInputResource {
     }
 }
 
-/// Buffered shot/impact events bridged from `FixedUpdate` to render-frame VFX systems.
+/// Battle lifecycle control signals bridged from UI/keyboard into `FixedUpdate`.
+#[derive(Resource, Default)]
+pub struct BattleControlResource {
+    pub restart_requested: bool,
+}
+
+/// Buffered shot/impact/hit/kill events bridged from `FixedUpdate` to render-frame VFX/HUD systems.
 #[derive(Resource, Default)]
 pub struct PendingSimEvents {
     pub fired_shots: Vec<FiredShot>,
     pub impacts: Vec<ImpactEvent>,
+    pub tank_hits: Vec<TankHitEvent>,
+    pub kills: Vec<KillEvent>,
+    pub battle_restarted: bool,
 }

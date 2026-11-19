@@ -1,13 +1,24 @@
+pub mod ai;
 pub mod ballistics;
+pub mod battle;
 pub mod map_gen;
+pub mod sim_world;
 pub mod tank;
 
-pub use ballistics::{FIXED_DT, GRAVITY, ImpactEvent, Projectile, SimWorld};
+pub use ai::{BotBrain, BotMode, BotObjective, NAV_CELL_SIZE, NavGrid};
+pub use ballistics::{FIXED_DT, GRAVITY, ImpactEvent, Projectile};
+pub use battle::{
+    BATTLE_TIME_LIMIT, BattleMode, BattleOutcome, BattleState, CAPTURE_RATE_PER_SEC,
+    CaptureZoneState, KILL_TICKET_PENALTY, KillEvent, MAX_TANKS, STAGE3_HITS_TO_DESTROY,
+    START_TICKETS, TankHitEvent, TankId, TankUnit, Team, VISION_RANGE, ZONE_BLEED_PER_SEC,
+    ray_vs_tank, raycast_tanks, resolve_tank_collisions,
+};
 pub use map_gen::{
     CaptureZoneDef, MapMetadata, MinimapData, TacticalPosition, TacticalPositionKind,
     default_metadata_for_world, generate_european_valley_map, generate_flat_proving_ground,
     generate_minimap_data,
 };
+pub use sim_world::SimWorld;
 pub use tank::{FiredShot, TankConfig, TankInput, TankState, wrap_angle};
 
 #[cfg(test)]
@@ -36,7 +47,7 @@ mod tests {
     #[test]
     fn tank_drives_forward_turns_and_stays_inside_arena() {
         let mut sim = create_test_sim();
-        let start = sim.player_tank.position;
+        let start = sim.player_tank().position;
 
         // Accelerate forward (-Z) for 2 seconds
         for _ in 0..120 {
@@ -49,15 +60,15 @@ mod tests {
             );
         }
         assert!(
-            sim.player_tank.position.z < start.z - 8.0,
+            sim.player_tank().position.z < start.z - 8.0,
             "tank should move forward along -Z, pos={:?}",
-            sim.player_tank.position
+            sim.player_tank().position
         );
-        assert!(sim.player_tank.forward_speed > 5.0);
-        assert!((sim.player_tank.position.y - 0.0).abs() < 1e-4);
+        assert!(sim.player_tank().forward_speed > 5.0);
+        assert!((sim.player_tank().position.y - 0.0).abs() < 1e-4);
 
         // Turn left for 1 second
-        let yaw_before = sim.player_tank.hull_yaw;
+        let yaw_before = sim.player_tank().hull_yaw;
         for _ in 0..60 {
             sim.step_fixed(
                 FIXED_DT,
@@ -67,7 +78,7 @@ mod tests {
                 },
             );
         }
-        assert!(sim.player_tank.hull_yaw > yaw_before + 0.5);
+        assert!(sim.player_tank().hull_yaw > yaw_before + 0.5);
     }
 
     #[test]
@@ -86,14 +97,14 @@ mod tests {
         }
         // Right is -PI/2 yaw; gun pitch should clamp cleanly at gun_max_pitch
         assert!(
-            (sim.player_tank.turret_yaw_local + std::f32::consts::FRAC_PI_2).abs() < 0.05,
+            (sim.player_tank().turret_yaw_local + std::f32::consts::FRAC_PI_2).abs() < 0.05,
             "turret_yaw_local={}",
-            sim.player_tank.turret_yaw_local
+            sim.player_tank().turret_yaw_local
         );
         assert!(
-            (sim.player_tank.gun_pitch_local - sim.player_tank.config.gun_max_pitch).abs() < 1e-3,
+            (sim.player_tank().gun_pitch_local - sim.player_tank().config.gun_max_pitch).abs() < 1e-3,
             "gun_pitch_local={}",
-            sim.player_tank.gun_pitch_local
+            sim.player_tank().gun_pitch_local
         );
     }
 
@@ -121,9 +132,9 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert_eq!(sim.player_tank.shots_fired, 1);
+        assert_eq!(sim.player_tank().shots_fired, 1);
         assert_eq!(sim.projectiles.len(), 1);
-        assert!(!sim.player_tank.is_loaded());
+        assert!(!sim.player_tank().is_loaded());
 
         // Immediate second fire must be blocked by reload timer
         sim.step_fixed(
@@ -134,7 +145,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert_eq!(sim.player_tank.shots_fired, 1);
+        assert_eq!(sim.player_tank().shots_fired, 1);
 
         // Advance simulation until shell hits flat ground (~40m / 780m/s ≈ 0.05s)
         let mut impact = None;
@@ -200,7 +211,7 @@ mod tests {
         // Verify player can spawn cleanly and drive along the south approach road without snagging
         let models = build_basic_tank_models();
         let mut sim = SimWorld::with_map(world, meta, TankConfig::stage1_basic(&models));
-        let start_z = sim.player_tank.position.z;
+        let start_z = sim.player_tank().position.z;
         for _ in 0..180 {
             sim.step_fixed(
                 FIXED_DT,
@@ -211,9 +222,9 @@ mod tests {
             );
         }
         assert!(
-            sim.player_tank.position.z < start_z - 15.0,
+            sim.player_tank().position.z < start_z - 15.0,
             "player should drive cleanly north from spawn along main road, start_z={start_z}, now={}",
-            sim.player_tank.position.z
+            sim.player_tank().position.z
         );
     }
 
@@ -245,13 +256,13 @@ mod tests {
                     ..Default::default()
                 },
             );
-            max_pitch_seen = max_pitch_seen.max(sim.player_tank.hull_pitch);
+            max_pitch_seen = max_pitch_seen.max(sim.player_tank().hull_pitch);
         }
 
         assert!(
-            sim.player_tank.position.y > 1.0,
+            sim.player_tank().position.y > 1.0,
             "tank must climb the voxel ramp, y={}",
-            sim.player_tank.position.y
+            sim.player_tank().position.y
         );
         assert!(
             max_pitch_seen > 0.08,
@@ -286,14 +297,14 @@ mod tests {
 
         // Wall front face is at z = -9.5m (vz = -20 spans [-10.0, -9.5]); hull front is 2.65m ahead
         assert!(
-            sim.player_tank.position.z > -9.5,
+            sim.player_tank().position.z > -9.5,
             "tank must be stopped by brick building wall, pos={:?}",
-            sim.player_tank.position
+            sim.player_tank().position
         );
         assert!(
-            sim.player_tank.forward_speed.abs() < 0.5,
+            sim.player_tank().forward_speed.abs() < 0.5,
             "impact with perpendicular wall should halt forward speed, speed={}",
-            sim.player_tank.forward_speed
+            sim.player_tank().forward_speed
         );
     }
 
@@ -315,13 +326,13 @@ mod tests {
             );
         }
 
-        let probe_z = sim.player_tank.position.z - 2.65 - 0.1;
+        let probe_z = sim.player_tank().position.z - 2.65 - 0.1;
         let front_h = sim.voxels.surface_height_at(0.0, probe_z);
         let front_top = sim.voxels.top_solid_voxel_at(0, (probe_z * 2.0).floor() as i32);
         assert!(
-            sim.player_tank.position.z < -65.0,
+            sim.player_tank().position.z < -65.0,
             "tank should cleanly traverse village square and stone arch bridge onto north bank, stopped at {:?}, front_z={probe_z}, front_h={front_h:?}, front_top={front_top:?}",
-            sim.player_tank.position
+            sim.player_tank().position
         );
         // Verify bridge deck stays dry above water (Y > 0.5 at bridge center)
         let bridge_y = sim.voxels.surface_height_at(0.0, -38.5).unwrap();
@@ -381,5 +392,256 @@ mod tests {
             mesh_mb < 25.0,
             "total world GPU mesh buffer budget must stay under 25 MB, got {mesh_mb:.2} MB"
         );
+    }
+
+    #[test]
+    fn nav_grid_is_compact_and_paths_reach_all_zones_and_cross_bridge() {
+        let (world, meta) = generate_european_valley_map();
+        let nav = NavGrid::build(&world);
+        assert!(
+            nav.memory_bytes() < 64 * 1024,
+            "NavGrid must stay under 64 KiB, got {} B",
+            nav.memory_bytes()
+        );
+        assert!(nav.walkable_count() > 2500);
+
+        for spawn in meta.spawn_allies.iter().take(3) {
+            for zone in &meta.capture_zones {
+                let path = nav.find_path(*spawn, zone.center);
+                assert!(
+                    !path.is_empty(),
+                    "Allies spawn {spawn:?} failed to path to Zone {}",
+                    zone.label
+                );
+                let end = *path.last().unwrap();
+                let dist_xz = ((end.x - zone.center.x).powi(2) + (end.z - zone.center.z).powi(2)).sqrt();
+                assert!(
+                    dist_xz < zone.radius,
+                    "path from {spawn:?} to Zone {} ended too far away ({dist_xz:.1} m)",
+                    zone.label
+                );
+            }
+        }
+
+        // Cross-map path across valley stream / bridge to Axis spawn
+        let south = meta.spawn_allies[0];
+        let north = meta.spawn_axis[0];
+        let cross = nav.find_path(south, north);
+        assert!(!cross.is_empty());
+        let end = *cross.last().unwrap();
+        assert!(
+            ((end.x - north.x).powi(2) + (end.z - north.z).powi(2)).sqrt() < 12.0,
+            "expected cross-river A* path to reach North spawn {north:?}, ended at {end:?}"
+        );
+    }
+
+    #[test]
+    fn tank_vs_tank_collision_separates_living_tanks_and_treats_wrecks_as_cover() {
+        let voxels = generate_flat_proving_ground(96);
+        let models = build_basic_tank_models();
+        let cfg = TankConfig::stage1_basic(&models);
+
+        let mut a = TankUnit::new(
+            TankId(0),
+            "Alpha",
+            Team::Allies,
+            true,
+            TankState::new(cfg.clone(), Vec3::new(0.0, 0.0, 10.0), 0.0),
+        );
+        let mut b = TankUnit::new(
+            TankId(1),
+            "Beta",
+            Team::Axis,
+            false,
+            TankState::new(cfg, Vec3::new(0.0, 0.0, -10.0), std::f32::consts::PI),
+        );
+        a.state.forward_speed = 12.0;
+        b.state.forward_speed = 12.0;
+
+        let mut tanks = vec![a, b];
+        for _ in 0..150 {
+            let dummy = TankInput {
+                throttle: 1.0,
+                ..Default::default()
+            };
+            tanks[0].state.step(FIXED_DT, dummy, &voxels);
+            tanks[1].state.step(FIXED_DT, dummy, &voxels);
+            resolve_tank_collisions(&mut tanks, &voxels);
+        }
+
+        let sep_z = (tanks[0].state.position.z - tanks[1].state.position.z).abs();
+        assert!(
+            sep_z >= 5.2,
+            "head-on colliding tanks must stay physically separated, sep_z={sep_z:.2}"
+        );
+
+        // Wreck test: destroy Beta and drive Alpha harder into it — wreck remains stationary cover
+        tanks[1].alive = false;
+        tanks[1].state.forward_speed = 0.0;
+        let wreck_pos = tanks[1].state.position;
+        for _ in 0..60 {
+            tanks[0].state.step(
+                FIXED_DT,
+                TankInput {
+                    throttle: 1.0,
+                    ..Default::default()
+                },
+                &voxels,
+            );
+            resolve_tank_collisions(&mut tanks, &voxels);
+        }
+        assert!(
+            tanks[1].state.position.distance(wreck_pos) < 1e-4,
+            "wrecked tank must act as immobile physical cover"
+        );
+        assert!(
+            (tanks[0].state.position.z - wreck_pos.z).abs() >= 5.2,
+            "living tank must not clip through wreck"
+        );
+    }
+
+    #[test]
+    fn direct_hits_destroy_enemy_tank_in_three_shots_and_emit_kill_events() {
+        let voxels = generate_flat_proving_ground(128);
+        let models = build_basic_tank_models();
+        let cfg = TankConfig::stage1_basic(&models);
+        let map = default_metadata_for_world(&voxels, "duel", "Duel");
+        let mut sim = SimWorld::new_team_battle(voxels, map, cfg, 1);
+
+        // Disable Axis bot brain steering/movement and position target directly 50 m ahead
+        sim.brains[1] = None;
+        sim.tanks[1].state.position = Vec3::new(0.0, 0.0, -50.0);
+        sim.tanks[1].state.hull_yaw = std::f32::consts::PI;
+
+        let target_aim = sim.tanks[1].aim_center();
+        let mut total_hits = 0usize;
+        let mut total_kills = 0usize;
+        for _ in 0..1000 {
+            let fire = sim.player_tank().is_loaded();
+            sim.step_fixed(
+                FIXED_DT,
+                TankInput {
+                    aim_world_point: target_aim,
+                    fire,
+                    ..Default::default()
+                },
+            );
+            total_hits += sim.recent_tank_hits.iter().filter(|h| h.damaged).count();
+            total_kills += sim.recent_kills.len();
+            if sim.battle.is_over() {
+                break;
+            }
+        }
+
+        assert_eq!(total_hits, STAGE3_HITS_TO_DESTROY as usize);
+        assert_eq!(total_kills, 1);
+        assert!(!sim.tanks[1].alive);
+        assert_eq!(sim.player_unit().kills, 1);
+        assert_eq!(sim.battle.outcome, BattleOutcome::Victory(Team::Allies));
+        assert!(sim.battle.axis_tickets <= START_TICKETS - KILL_TICKET_PENALTY + 0.01);
+    }
+
+    #[test]
+    fn capture_zones_transfer_ownership_bleed_tickets_and_resolve_victory() {
+        let (world, meta) = generate_european_valley_map();
+        let models = build_basic_tank_models();
+        let cfg = TankConfig::stage1_basic(&models);
+        let mut sim = SimWorld::new_team_battle(world, meta, cfg, 2);
+
+        // Disable bots and station Allies unit #1 inside Zone B, keep enemy away
+        sim.brains.fill(None);
+        let zone_b = sim.battle.zones[1].center;
+        sim.tanks[1].state.position = zone_b;
+        sim.tanks[1].state.settle_on_terrain(&sim.voxels);
+        // Move Axis tanks far to their north corner so nobody contests B
+        for t in sim.tanks.iter_mut().filter(|t| t.team == Team::Axis) {
+            t.state.position = Vec3::new(150.0, 4.0, -150.0);
+        }
+
+        // Advance 25 simulated seconds: single tank captures at 0.05/s => 20s to full capture
+        for _ in 0..(25 * 60) {
+            sim.step_fixed(FIXED_DT, TankInput::default());
+        }
+
+        assert_eq!(sim.battle.zones[1].owner, Some(Team::Allies));
+        assert!(
+            sim.battle.axis_tickets < START_TICKETS - 5.0,
+            "owning more zones must bleed Axis tickets, got {}",
+            sim.battle.axis_tickets
+        );
+        assert_eq!(sim.battle.allies_tickets, START_TICKETS);
+    }
+
+    #[test]
+    fn six_v_six_european_valley_team_battle_runs_cleanly_and_restarts_in_place() {
+        let (world, meta) = generate_european_valley_map();
+        let models = build_basic_tank_models();
+        let cfg = TankConfig::stage1_basic(&models);
+        let mut sim = SimWorld::new_team_battle(world, meta, cfg, 6);
+
+        assert_eq!(sim.tanks.len(), 12);
+        assert_eq!(sim.alive_count(Team::Allies), 6);
+        assert_eq!(sim.alive_count(Team::Axis), 6);
+
+        for unit in &sim.tanks {
+            let colls = unit.state.count_hull_collisions(
+                &sim.voxels,
+                unit.state.position.x,
+                unit.state.position.z,
+                unit.state.hull_yaw,
+            );
+            assert_eq!(
+                colls, 0,
+                "unit {} spawned inside obstacle at {:?}",
+                unit.name, unit.state.position
+            );
+        }
+
+        let mut total_bot_shots = 0usize;
+        let mut zone_progress_seen = false;
+        // Run 40 simulated seconds of autonomous 6v6 combat (player idle, 11 bots fighting)
+        for _ in 0..(40 * 60) {
+            sim.step_fixed(FIXED_DT, TankInput::default());
+            total_bot_shots += sim.recent_shots.len();
+            if sim.battle.zones.iter().any(|z| z.progress.abs() > 0.05) {
+                zone_progress_seen = true;
+            }
+        }
+
+        // Bots should leave spawn, maneuver toward capture zones, spot & shoot at enemies
+        let allies_moved = sim
+            .tanks
+            .iter()
+            .filter(|t| !t.is_player && t.team == Team::Allies && t.state.position.z < 110.0)
+            .count();
+        let axis_moved = sim
+            .tanks
+            .iter()
+            .filter(|t| t.team == Team::Axis && t.state.position.z > -110.0)
+            .count();
+        assert!(allies_moved >= 4, "allied bots should advance north, allies_moved={allies_moved}");
+        assert!(axis_moved >= 4, "axis bots should advance south, axis_moved={axis_moved}");
+        assert!(
+            total_bot_shots >= 10,
+            "bots should acquire LOS and exchange cannon fire, shots={total_bot_shots}"
+        );
+        assert!(zone_progress_seen, "bots should reach and begin capturing A/B/C zones");
+
+        for unit in &sim.tanks {
+            assert!(unit.state.position.is_finite());
+            assert!(unit.state.position.x.abs() <= 192.0);
+            assert!(unit.state.position.z.abs() <= 192.0);
+        }
+
+        // Verify in-place restart restores full 6v6 state cleanly
+        sim.restart_battle();
+        assert_eq!(sim.tick, 0);
+        assert_eq!(sim.tanks.len(), 12);
+        assert_eq!(sim.alive_count(Team::Allies), 6);
+        assert_eq!(sim.alive_count(Team::Axis), 6);
+        assert_eq!(sim.battle.outcome, BattleOutcome::Ongoing);
+        assert_eq!(sim.battle.allies_tickets, START_TICKETS);
+        assert_eq!(sim.battle.axis_tickets, START_TICKETS);
+        assert!(sim.battle.zones.iter().all(|z| z.owner.is_none() && z.progress == 0.0));
     }
 }

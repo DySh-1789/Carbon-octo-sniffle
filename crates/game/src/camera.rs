@@ -8,7 +8,9 @@ use bevy::render::view::Msaa;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use voxel::raycast_world;
 
-use crate::bridge::{PlayerInputResource, SimResource, to_bevy_quat, to_bevy_vec3, to_sim_vec3};
+use crate::bridge::{
+    PendingSimEvents, PlayerInputResource, SimResource, to_bevy_quat, to_bevy_vec3, to_sim_vec3,
+};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum CameraMode {
@@ -69,7 +71,7 @@ fn setup_scene_lighting_and_camera(
     mut cam_ctrl: ResMut<TankCameraController>,
 ) {
     // Align initial camera orbit direction with the player tank's spawn heading
-    cam_ctrl.yaw = sim.0.player_tank.hull_yaw;
+    cam_ctrl.yaw = sim.0.player_tank().hull_yaw;
 
     // Warm sunlit European valley sky matching horizon fog
     commands.insert_resource(ClearColor(Color::srgb(0.62, 0.76, 0.88)));
@@ -100,7 +102,7 @@ fn setup_scene_lighting_and_camera(
         Transform::from_xyz(110.0, 155.0, 85.0).looking_at(Vec3::ZERO, Vec3::Y),
     ));
 
-    let spawn_pos = to_bevy_vec3(sim.0.player_tank.position);
+    let spawn_pos = to_bevy_vec3(sim.0.player_tank().position);
 
     // Main 3D tank camera (`Msaa::Off` eliminates heavy 4x multisampled render targets)
     commands.spawn((
@@ -127,17 +129,39 @@ fn setup_scene_lighting_and_camera(
     ));
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_camera_controls(
     keys: Res<ButtonInput<KeyCode>>,
     mouse_buttons: Res<ButtonInput<MouseButton>>,
     mouse_motion: Res<AccumulatedMouseMotion>,
     mouse_scroll: Res<AccumulatedMouseScroll>,
+    sim: Res<SimResource>,
+    pending: Res<PendingSimEvents>,
     mut cam_ctrl: ResMut<TankCameraController>,
     mut cursor_q: Query<&mut CursorOptions, With<PrimaryWindow>>,
 ) {
-    // Lock cursor on left/right mouse click; release on Escape
+    if pending.battle_restarted {
+        cam_ctrl.yaw = sim.0.player_tank().hull_yaw;
+        cam_ctrl.pitch = -0.18;
+        cam_ctrl.mode = CameraMode::ThirdPerson;
+    }
+
+    let battle_over = sim.0.battle.is_over();
+    let player_alive = sim.0.player_unit().alive;
+
+    if !player_alive && cam_ctrl.mode == CameraMode::Sniper {
+        cam_ctrl.mode = CameraMode::ThirdPerson;
+    }
+
+    // Unlock cursor cleanly at battle end so "Play Again" button can be clicked directly
     if let Ok(mut cursor) = cursor_q.single_mut() {
-        if !cam_ctrl.cursor_locked
+        if battle_over {
+            if cam_ctrl.cursor_locked {
+                cursor.grab_mode = CursorGrabMode::None;
+                cursor.visible = true;
+                cam_ctrl.cursor_locked = false;
+            }
+        } else if !cam_ctrl.cursor_locked
             && (mouse_buttons.just_pressed(MouseButton::Left)
                 || mouse_buttons.just_pressed(MouseButton::Right))
         {
@@ -151,8 +175,8 @@ fn handle_camera_controls(
         }
     }
 
-    // Shift toggles 3rd-person <-> Sniper gunner optic
-    if keys.just_pressed(KeyCode::ShiftLeft) || keys.just_pressed(KeyCode::ShiftRight) {
+    // Shift toggles 3rd-person <-> Sniper gunner optic while player is alive
+    if player_alive && (keys.just_pressed(KeyCode::ShiftLeft) || keys.just_pressed(KeyCode::ShiftRight)) {
         cam_ctrl.mode = match cam_ctrl.mode {
             CameraMode::ThirdPerson => CameraMode::Sniper,
             CameraMode::Sniper => CameraMode::ThirdPerson,
@@ -207,7 +231,8 @@ fn update_camera_and_aim(
         return;
     };
 
-    let tank = &sim.0.player_tank;
+    let player_id = sim.0.player_unit().id;
+    let tank = sim.0.player_tank();
     let look_rot = Quat::from_rotation_y(cam_ctrl.yaw) * Quat::from_rotation_x(cam_ctrl.pitch);
     let look_dir = (look_rot * Vec3::NEG_Z).normalize();
 
@@ -227,7 +252,6 @@ fn update_camera_and_aim(
             }
 
             let mut cam_pos = pivot - look_dir * safe_dist;
-            // Keep camera above local voxel terrain height
             if let Some(ground_y) = sim
                 .0
                 .voxels
@@ -243,19 +267,19 @@ fn update_camera_and_aim(
                 persp.fov = 60.0f32.to_radians();
             }
 
-            // Compute desired world aim point from camera crosshair unless free-looking
-            if !cam_ctrl.free_look {
+            // Converge crosshair aim onto both voxels AND enemy tanks (zero skyline parallax)
+            if !cam_ctrl.free_look && sim.0.player_unit().alive {
                 let ray_origin = to_sim_vec3(cam_pos);
                 let ray_dir = to_sim_vec3((cam_tf.forward()).as_vec3());
                 let max_aim_range = 450.0;
-                let aim_point = raycast_world(&sim.0.voxels, ray_origin, ray_dir, max_aim_range)
-                    .map(|h| h.point)
+                let aim_point = sim
+                    .0
+                    .raycast_scene(ray_origin, ray_dir, max_aim_range, Some(player_id))
                     .unwrap_or(ray_origin + ray_dir * max_aim_range);
                 player_input.aim_world_point = aim_point;
             }
         }
         CameraMode::Sniper => {
-            // Gunner sight mounted next to the mantlet so the barrel doesn't obscure the optic
             let gun_pos = to_bevy_vec3(tank.gun_world_position());
             let gun_rot = to_bevy_quat(tank.gun_world_rotation());
             let optic_pos = gun_pos + gun_rot * Vec3::new(0.42, 0.25, -0.40);
@@ -270,8 +294,9 @@ fn update_camera_and_aim(
             let ray_origin = to_sim_vec3(optic_pos);
             let ray_dir = to_sim_vec3(look_dir);
             let max_aim_range = 500.0;
-            let aim_point = raycast_world(&sim.0.voxels, ray_origin, ray_dir, max_aim_range)
-                .map(|h| h.point)
+            let aim_point = sim
+                .0
+                .raycast_scene(ray_origin, ray_dir, max_aim_range, Some(player_id))
                 .unwrap_or(ray_origin + ray_dir * max_aim_range);
             player_input.aim_world_point = aim_point;
         }
