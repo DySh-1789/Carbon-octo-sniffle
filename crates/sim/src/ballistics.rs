@@ -1,6 +1,7 @@
 use voxel::glam::Vec3;
 use voxel::{VoxelId, VoxelWorld, raycast_world};
 
+use crate::map_gen::{MapMetadata, default_metadata_for_world};
 use crate::tank::{FiredShot, TankConfig, TankInput, TankState};
 
 /// Standard gravity acceleration in m/s².
@@ -31,9 +32,10 @@ pub struct ImpactEvent {
     pub impact_speed: f32,
 }
 
-/// Complete headless simulation state for Stage 1.
+/// Complete headless simulation state.
 pub struct SimWorld {
     pub voxels: VoxelWorld,
+    pub map: MapMetadata,
     pub player_tank: TankState,
     pub projectiles: Vec<Projectile>,
     pub recent_impacts: Vec<ImpactEvent>,
@@ -43,11 +45,24 @@ pub struct SimWorld {
 }
 
 impl SimWorld {
+    /// Creates a simulation on an arbitrary `VoxelWorld` (spawning at origin, used by unit tests).
     pub fn new(voxels: VoxelWorld, tank_config: TankConfig) -> Self {
-        let spawn_y = voxels.surface_height_at(0.0, 0.0).unwrap_or(0.0);
-        let player_tank = TankState::new(tank_config, Vec3::new(0.0, spawn_y, 0.0), 0.0);
+        let map = default_metadata_for_world(&voxels, "proving_ground", "Proving Ground");
+        Self::with_map(voxels, map, tank_config)
+    }
+
+    /// Creates a simulation from a generated `(VoxelWorld, MapMetadata)` pair, spawning the player
+    /// at the primary allied spawn point settled cleanly onto the voxel terrain.
+    pub fn with_map(voxels: VoxelWorld, map: MapMetadata, tank_config: TankConfig) -> Self {
+        let spawn = map.spawn_allies.first().copied().unwrap_or_else(|| {
+            let y = voxels.surface_height_at(0.0, 0.0).unwrap_or(0.0);
+            Vec3::new(0.0, y, 0.0)
+        });
+        let mut player_tank = TankState::new(tank_config, spawn, 0.0);
+        player_tank.settle_on_terrain(&voxels);
         Self {
             voxels,
+            map,
             player_tank,
             projectiles: Vec::new(),
             recent_impacts: Vec::new(),

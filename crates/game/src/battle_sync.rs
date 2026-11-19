@@ -1,19 +1,19 @@
 use bevy::prelude::*;
-use sim::{FIXED_DT, SimWorld, TankConfig, generate_flat_proving_ground};
+use sim::{FIXED_DT, SimWorld, TankConfig, generate_european_valley_map};
 use voxel::build_basic_tank_models;
 
 use crate::bridge::{PendingSimEvents, PlayerInputResource, SimResource};
 use crate::tank_view::TankModelsResource;
 
 /// Headless-compatible simulation plugin (runs with `MinimalPlugins` for automated tests).
-pub struct Stage1SimPlugin;
+pub struct BattleSimPlugin;
 
-impl Plugin for Stage1SimPlugin {
+impl Plugin for BattleSimPlugin {
     fn build(&self, app: &mut App) {
         let models = build_basic_tank_models();
         let tank_cfg = TankConfig::stage1_basic(&models);
-        let world = generate_flat_proving_ground(128);
-        let sim = SimWorld::new(world, tank_cfg);
+        let (world, metadata) = generate_european_valley_map();
+        let sim = SimWorld::with_map(world, metadata, tank_cfg);
 
         app.insert_resource(Time::<Fixed>::from_hz(60.0))
             .insert_resource(TankModelsResource(models))

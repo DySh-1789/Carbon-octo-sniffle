@@ -20,10 +20,29 @@ impl VoxelId {
     pub const STEEL_ACCENT: Self = Self(11);
     pub const GLASS_OPTIC: Self = Self(12);
     pub const RUBBER_WHEEL: Self = Self(13);
+    pub const ROAD_ASPHALT: Self = Self(14);
+    pub const COBBLESTONE: Self = Self(15);
+    pub const ROCK: Self = Self(16);
+    pub const BRICK: Self = Self(17);
+    pub const PLASTER_WALL: Self = Self(18);
+    pub const WOOD: Self = Self(19);
+    pub const ROOF_TILE: Self = Self(20);
+    pub const ROOF_SLATE: Self = Self(21);
+    pub const HEDGE: Self = Self(22);
+    pub const WATER: Self = Self(23);
+    pub const SANDBAG: Self = Self(24);
+    pub const TREE_TRUNK: Self = Self(25);
+    pub const LEAVES: Self = Self(26);
+    pub const WINDOW_DARK: Self = Self(27);
 
     #[inline]
     pub const fn is_air(self) -> bool {
         self.0 == 0
+    }
+
+    #[inline]
+    pub const fn is_water(self) -> bool {
+        self.0 == Self::WATER.0
     }
 }
 
@@ -197,6 +216,146 @@ impl MaterialRegistry {
                 durability: 200.0,
                 blast_resistance: 8.0,
                 armor_equiv_mm: 15.0,
+                color_jitter: 0.01,
+            },
+            // 14: ROAD_ASPHALT
+            VoxelMaterial {
+                name: "RoadAsphalt",
+                base_color: [0.24, 0.25, 0.26, 1.0],
+                is_solid: true,
+                durability: 130.0,
+                blast_resistance: 4.0,
+                armor_equiv_mm: 20.0,
+                color_jitter: 0.025,
+            },
+            // 15: COBBLESTONE
+            VoxelMaterial {
+                name: "Cobblestone",
+                base_color: [0.50, 0.48, 0.44, 1.0],
+                is_solid: true,
+                durability: 115.0,
+                blast_resistance: 3.8,
+                armor_equiv_mm: 18.0,
+                color_jitter: 0.045,
+            },
+            // 16: ROCK
+            VoxelMaterial {
+                name: "Rock",
+                base_color: [0.44, 0.45, 0.44, 1.0],
+                is_solid: true,
+                durability: 220.0,
+                blast_resistance: 8.0,
+                armor_equiv_mm: 45.0,
+                color_jitter: 0.05,
+            },
+            // 17: BRICK
+            VoxelMaterial {
+                name: "Brick",
+                base_color: [0.56, 0.25, 0.19, 1.0],
+                is_solid: true,
+                durability: 100.0,
+                blast_resistance: 3.2,
+                armor_equiv_mm: 22.0,
+                color_jitter: 0.04,
+            },
+            // 18: PLASTER_WALL
+            VoxelMaterial {
+                name: "PlasterWall",
+                base_color: [0.77, 0.73, 0.63, 1.0],
+                is_solid: true,
+                durability: 85.0,
+                blast_resistance: 2.6,
+                armor_equiv_mm: 16.0,
+                color_jitter: 0.03,
+            },
+            // 19: WOOD
+            VoxelMaterial {
+                name: "Wood",
+                base_color: [0.39, 0.27, 0.16, 1.0],
+                is_solid: true,
+                durability: 45.0,
+                blast_resistance: 1.2,
+                armor_equiv_mm: 6.0,
+                color_jitter: 0.035,
+            },
+            // 20: ROOF_TILE
+            VoxelMaterial {
+                name: "RoofTile",
+                base_color: [0.50, 0.22, 0.15, 1.0],
+                is_solid: true,
+                durability: 60.0,
+                blast_resistance: 1.5,
+                armor_equiv_mm: 8.0,
+                color_jitter: 0.035,
+            },
+            // 21: ROOF_SLATE
+            VoxelMaterial {
+                name: "RoofSlate",
+                base_color: [0.29, 0.33, 0.39, 1.0],
+                is_solid: true,
+                durability: 65.0,
+                blast_resistance: 1.6,
+                armor_equiv_mm: 9.0,
+                color_jitter: 0.03,
+            },
+            // 22: HEDGE
+            VoxelMaterial {
+                name: "Hedge",
+                base_color: [0.18, 0.31, 0.14, 1.0],
+                is_solid: true,
+                durability: 20.0,
+                blast_resistance: 0.6,
+                armor_equiv_mm: 2.0,
+                color_jitter: 0.045,
+            },
+            // 23: WATER (shallow fordable riverbed surface)
+            VoxelMaterial {
+                name: "Water",
+                base_color: [0.18, 0.42, 0.56, 1.0],
+                is_solid: true,
+                durability: 999.0,
+                blast_resistance: 99.0,
+                armor_equiv_mm: 1.0,
+                color_jitter: 0.025,
+            },
+            // 24: SANDBAG
+            VoxelMaterial {
+                name: "Sandbag",
+                base_color: [0.64, 0.58, 0.44, 1.0],
+                is_solid: true,
+                durability: 70.0,
+                blast_resistance: 2.4,
+                armor_equiv_mm: 12.0,
+                color_jitter: 0.035,
+            },
+            // 25: TREE_TRUNK
+            VoxelMaterial {
+                name: "TreeTrunk",
+                base_color: [0.31, 0.22, 0.14, 1.0],
+                is_solid: true,
+                durability: 55.0,
+                blast_resistance: 1.4,
+                armor_equiv_mm: 8.0,
+                color_jitter: 0.03,
+            },
+            // 26: LEAVES
+            VoxelMaterial {
+                name: "Leaves",
+                base_color: [0.21, 0.38, 0.17, 1.0],
+                is_solid: true,
+                durability: 12.0,
+                blast_resistance: 0.4,
+                armor_equiv_mm: 1.0,
+                color_jitter: 0.05,
+            },
+            // 27: WINDOW_DARK
+            VoxelMaterial {
+                name: "WindowDark",
+                base_color: [0.13, 0.16, 0.20, 1.0],
+                is_solid: true,
+                durability: 25.0,
+                blast_resistance: 0.5,
+                armor_equiv_mm: 2.0,
                 color_jitter: 0.01,
             },
         ];

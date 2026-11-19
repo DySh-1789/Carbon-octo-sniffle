@@ -137,4 +137,43 @@ mod tests {
         let empty = VoxelModel::new(UVec3::splat(4), Vec3::ZERO, TANK_VOXEL_SIZE);
         assert!(mesh_voxel_model(&empty, &registry).is_empty());
     }
+
+    #[test]
+    fn stage2_materials_registered_and_ground_height_near_ignores_canopy_overhang() {
+        let registry = MaterialRegistry::new();
+        for id in [
+            VoxelId::ROAD_ASPHALT,
+            VoxelId::COBBLESTONE,
+            VoxelId::ROCK,
+            VoxelId::BRICK,
+            VoxelId::PLASTER_WALL,
+            VoxelId::WOOD,
+            VoxelId::ROOF_TILE,
+            VoxelId::ROOF_SLATE,
+            VoxelId::HEDGE,
+            VoxelId::WATER,
+            VoxelId::SANDBAG,
+            VoxelId::TREE_TRUNK,
+            VoxelId::LEAVES,
+            VoxelId::WINDOW_DARK,
+        ] {
+            let mat = registry.get(id);
+            assert_ne!(mat.name, "Air", "material {:?} fell back to Air", id);
+            assert!(registry.is_solid(id));
+        }
+
+        // Ground at vy = -1 (top at Y = 0.0), overhanging tree leaves at vy = 7..9 (Y = 3.5..5.0)
+        let mut world = VoxelWorld::new(WORLD_VOXEL_SIZE);
+        world.bounds_min = IVec3::new(-4, -2, -4);
+        world.bounds_max = IVec3::new(4, 12, 4);
+        world.fill_column_raw(0, 0, -2, -1, VoxelId::GRASS);
+        world.fill_column_raw(0, 0, 7, 9, VoxelId::LEAVES);
+
+        // surface_height_at sees top of canopy, whereas ground_height_near finds the road/ground below
+        assert_eq!(world.surface_height_at(0.25, 0.25), Some(5.0));
+        assert_eq!(
+            world.ground_height_near(0.25, 0.25, 0.0, 0.75, 2.0),
+            Some(0.0)
+        );
+    }
 }

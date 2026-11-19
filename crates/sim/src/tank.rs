@@ -1,6 +1,6 @@
 use std::f32::consts::{PI, TAU};
 
-use voxel::glam::{Quat, Vec3};
+use voxel::glam::{IVec3, Quat, Vec3};
 use voxel::{TankVoxelModels, VoxelWorld, raycast_world};
 
 /// Static performance and geometry parameters for a tank.
@@ -35,13 +35,17 @@ pub struct TankConfig {
     pub shell_drag: f32,
     /// Horizontal bounding half-extent used to keep hull inside playable arena.
     pub hull_radius: f32,
+    /// Half-width of tank hull/tracks in meters for obstacle collision & suspension.
+    pub hull_half_width: f32,
+    /// Half-length of tank hull/tracks in meters for obstacle collision & suspension.
+    pub hull_half_length: f32,
     pub turret_mount_offset: Vec3,
     pub gun_mount_offset: Vec3,
     pub muzzle_offset: Vec3,
 }
 
 impl TankConfig {
-    /// Balanced WWII medium tank profile matching the Stage 1 base voxel tank.
+    /// Balanced WWII medium tank profile matching the base voxel tank.
     pub fn stage1_basic(models: &TankVoxelModels) -> Self {
         Self {
             name: "Base Medium Tank".to_string(),
@@ -59,6 +63,8 @@ impl TankConfig {
             muzzle_velocity: 780.0,
             shell_drag: 0.04,
             hull_radius: 3.2,
+            hull_half_width: 1.55,
+            hull_half_length: 2.65,
             turret_mount_offset: models.turret_mount_offset,
             gun_mount_offset: models.gun_mount_offset,
             muzzle_offset: models.muzzle_offset,
@@ -233,12 +239,36 @@ impl TankState {
         }
     }
 
-    /// Advances tank movement, turret slewing, reload, and recoil by `dt` seconds.
+    /// Immediately aligns tank height, pitch, and roll to the terrain beneath its 6 track probes.
+    /// Called once on spawn so the tank sits flush on slopes from the very first frame.
+    pub fn settle_on_terrain(&mut self, world: &VoxelWorld) {
+        if let Some(surface_y) = world.surface_height_at(self.position.x, self.position.z) {
+            self.position.y = surface_y;
+        }
+        let (target_y, target_pitch, target_roll) = self.compute_suspension_targets(world);
+        self.position.y = target_y;
+        self.hull_pitch = target_pitch;
+        self.hull_roll = target_roll;
+    }
+
+    /// Returns true if the tank tracks are currently standing on shallow fordable water.
+    pub fn is_on_water(&self, world: &VoxelWorld) -> bool {
+        let inv = 1.0 / world.voxel_size;
+        let vx = (self.position.x * inv).floor() as i32;
+        let vy = ((self.position.y - 0.15) * inv).floor() as i32;
+        let vz = (self.position.z * inv).floor() as i32;
+        world.get_voxel(IVec3::new(vx, vy, vz)).is_water()
+    }
+
+    /// Advances tank movement, 6-point terrain suspension, obstacle collisions, turret slewing,
+    /// reload, and recoil by `dt` seconds.
     pub fn step(&mut self, dt: f32, input: TankInput, world: &VoxelWorld) -> Option<FiredShot> {
         let throttle = input.throttle.clamp(-1.0, 1.0);
         let steer = input.steer.clamp(-1.0, 1.0);
+        let in_water = self.is_on_water(world);
 
-        // 1. Longitudinal tracked acceleration / braking / rolling drag
+        // 1. Longitudinal tracked acceleration / braking / slope grade physics / water ford drag
+        let slope_sin = self.hull_pitch.sin();
         if throttle.abs() > 0.01 {
             let opposing = (throttle > 0.0 && self.forward_speed < -0.1)
                 || (throttle < 0.0 && self.forward_speed > 0.1);
@@ -248,60 +278,106 @@ impl TankState {
                 self.config.acceleration
             };
             self.forward_speed += throttle * accel * dt;
+            // Uphill pitch reduces climbing acceleration; downhill adds slight gravity momentum
+            self.forward_speed -= slope_sin * 5.6 * dt;
         } else {
             let decel = self.config.coast_drag * dt;
             if self.forward_speed.abs() <= decel {
+                // Tracked hill-hold brake keeps stationary tank steady on hull-down slopes
                 self.forward_speed = 0.0;
             } else {
                 self.forward_speed -= self.forward_speed.signum() * decel;
+                self.forward_speed -= slope_sin * 3.8 * dt;
             }
         }
-        self.forward_speed = self
-            .forward_speed
-            .clamp(-self.config.max_reverse_speed, self.config.max_forward_speed);
 
-        // 2. Hull steering (neutral pivot turn when stationary, reverse steering inversion)
+        // Dynamic slope & water speed envelope (uphill slows max speed; water ford slows tracks)
+        let uphill_factor = (1.0 - 0.90 * slope_sin.max(0.0)).clamp(0.45, 1.0);
+        let downhill_boost = 1.0 + 0.14 * (-slope_sin).max(0.0);
+        let water_factor = if in_water { 0.72 } else { 1.0 };
+        let eff_max_fwd = self.config.max_forward_speed * uphill_factor * downhill_boost * water_factor;
+        let eff_max_rev = self.config.max_reverse_speed * water_factor;
+        self.forward_speed = self.forward_speed.clamp(-eff_max_rev, eff_max_fwd);
+
+        // 2. Hull steering (neutral pivot turn + reverse steering inversion + wall-wedge protection)
         if steer.abs() > 0.01 {
             let reverse_flip = if self.forward_speed < -0.4 { -1.0 } else { 1.0 };
-            // Slightly slower turn at full speed to preserve momentum feel
             let speed_ratio =
                 (self.forward_speed.abs() / self.config.max_forward_speed).clamp(0.0, 1.0);
             let turn_factor = 1.0 - 0.25 * speed_ratio;
             let delta_yaw = steer * reverse_flip * self.config.hull_turn_rate * turn_factor * dt;
-            self.hull_yaw = wrap_angle(self.hull_yaw + delta_yaw);
+            let cand_yaw = wrap_angle(self.hull_yaw + delta_yaw);
+
+            let current_hits = self.count_hull_collisions(
+                world,
+                self.position.x,
+                self.position.z,
+                self.hull_yaw,
+            );
+            let cand_hits =
+                self.count_hull_collisions(world, self.position.x, self.position.z, cand_yaw);
+            if cand_hits == 0 || cand_hits <= current_hits {
+                self.hull_yaw = cand_yaw;
+            }
             // Turning tracks bleeds a small amount of forward speed
             self.forward_speed *= (1.0 - 0.35 * steer.abs() * dt).max(0.0);
         }
 
-        // 3. Integrate horizontal movement and clamp to playable arena bounds
-        let forward = self.hull_forward();
-        let horiz_fwd = Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero();
-        self.position += horiz_fwd * self.forward_speed * dt;
+        // 3. Horizontal movement with sliding voxel building/rock/cliff collision resolution
+        let horiz_fwd = Vec3::new(-self.hull_yaw.sin(), 0.0, -self.hull_yaw.cos());
+        let move_delta = horiz_fwd * self.forward_speed * dt;
+        let old_x = self.position.x;
+        let old_z = self.position.z;
 
         let (min_x, max_x, min_z, max_z) = world.playable_bounds_xz();
         let pad = self.config.hull_radius + 1.0;
-        let clamped_x = self.position.x.clamp(min_x + pad, max_x - pad);
-        let clamped_z = self.position.z.clamp(min_z + pad, max_z - pad);
-        if (clamped_x - self.position.x).abs() > 1e-4 || (clamped_z - self.position.z).abs() > 1e-4
+        let cand_x = (old_x + move_delta.x).clamp(min_x + pad, max_x - pad);
+        let cand_z = (old_z + move_delta.z).clamp(min_z + pad, max_z - pad);
+
+        let bound_hit = (cand_x - (old_x + move_delta.x)).abs() > 1e-4
+            || (cand_z - (old_z + move_delta.z)).abs() > 1e-4;
+
+        if self.count_hull_collisions(world, cand_x, cand_z, self.hull_yaw) == 0 {
+            self.position.x = cand_x;
+            self.position.z = cand_z;
+            if bound_hit {
+                self.forward_speed *= 0.2;
+            }
+        } else if (cand_x - old_x).abs() > 1e-5
+            && self.count_hull_collisions(world, cand_x, old_z, self.hull_yaw) == 0
         {
-            self.position.x = clamped_x;
-            self.position.z = clamped_z;
-            self.forward_speed *= 0.2;
+            // Slide smoothly along X facade
+            self.position.x = cand_x;
+            self.forward_speed *= 0.86;
+        } else if (cand_z - old_z).abs() > 1e-5
+            && self.count_hull_collisions(world, old_x, cand_z, self.hull_yaw) == 0
+        {
+            // Slide smoothly along Z facade
+            self.position.z = cand_z;
+            self.forward_speed *= 0.86;
+        } else {
+            // Solid wall/boulder impact — stop forward motion cleanly
+            self.forward_speed = 0.0;
         }
 
-        // Ground snap (Stage 1 flat ground; expanded to 6-point suspension on Stage 2)
-        if let Some(surface_y) = world.surface_height_at(self.position.x, self.position.z) {
-            self.position.y = surface_y;
-        }
+        // 4. 6-point tracked suspension over voxel terrain (smooth height, pitch, and roll)
+        let (target_y, target_pitch, target_roll) = self.compute_suspension_targets(world);
+        let y_rate = if target_y >= self.position.y { 14.0 } else { 10.0 };
+        let y_alpha = 1.0 - (-y_rate * dt).exp();
+        self.position.y += (target_y - self.position.y) * y_alpha;
 
-        // 4. Independent turret yaw & gun pitch tracking toward `aim_world_point`
+        let att_alpha = 1.0 - (-9.5 * dt).exp();
+        self.hull_pitch += (target_pitch - self.hull_pitch) * att_alpha;
+        self.hull_roll += (target_roll - self.hull_roll) * att_alpha;
+
+        // 5. Independent turret yaw & gun pitch tracking toward `aim_world_point`
         self.update_turret_and_gun(dt, input.aim_world_point);
 
-        // 5. Reload & visual barrel recoil decay
+        // 6. Reload & visual barrel recoil decay
         self.reload_remaining = (self.reload_remaining - dt).max(0.0);
         self.recoil_offset = (self.recoil_offset - 1.1 * dt).max(0.0);
 
-        // 6. Main gun firing
+        // 7. Main gun firing
         if input.fire && self.is_loaded() {
             self.reload_remaining = self.config.reload_time;
             self.recoil_offset = 0.32;
@@ -318,6 +394,123 @@ impl TankState {
         }
 
         None
+    }
+
+    /// Computes target `(height_y, hull_pitch, hull_roll)` from 6 bilinear-smoothed track contact probes.
+    fn compute_suspension_targets(&self, world: &VoxelWorld) -> (f32, f32, f32) {
+        let track_x = (self.config.hull_half_width - 0.20).max(0.9);
+        let track_z = (self.config.hull_half_length - 0.65).max(1.5);
+        let sin_y = self.hull_yaw.sin();
+        let cos_y = self.hull_yaw.cos();
+        let sin_p = self.hull_pitch.sin();
+        let sin_r = self.hull_roll.sin();
+
+        let probes = [
+            (-track_x, -track_z), // 0: left front
+            (-track_x, 0.0),      // 1: left mid
+            (-track_x, track_z),  // 2: left rear
+            (track_x, -track_z),  // 3: right front
+            (track_x, 0.0),       // 4: right mid
+            (track_x, track_z),   // 5: right rear
+        ];
+
+        let mut h = [self.position.y; 6];
+        let mut valid_count = 0u32;
+        for (i, &(lx, lz)) in probes.iter().enumerate() {
+            let wx = self.position.x + lx * cos_y + lz * sin_y;
+            let wz = self.position.z - lx * sin_y + lz * cos_y;
+            let expected_y = self.position.y - lz * sin_p + lx * sin_r;
+            if let Some(gy) = sample_smooth_ground(world, wx, wz, expected_y) {
+                h[i] = gy;
+                valid_count += 1;
+            }
+        }
+
+        if valid_count == 0 {
+            return (self.position.y, 0.0, 0.0);
+        }
+
+        let avg_y = h.iter().sum::<f32>() / 6.0;
+        let mid_y = (h[1] + h[4]) * 0.5;
+        let target_y = avg_y.max(mid_y - 0.08);
+
+        let front_y = (h[0] + h[3]) * 0.5;
+        let rear_y = (h[2] + h[5]) * 0.5;
+        let left_y = (h[0] + h[1] + h[2]) / 3.0;
+        let right_y = (h[3] + h[4] + h[5]) / 3.0;
+
+        // Positive pitch = nose UP (+Y around +X); positive roll = right side UP (+Y around +Z)
+        let target_pitch = (front_y - rear_y)
+            .atan2(2.0 * track_z)
+            .clamp(-0.58, 0.58);
+        let target_roll = (right_y - left_y)
+            .atan2(2.0 * track_x)
+            .clamp(-0.52, 0.52);
+
+        (target_y, target_pitch, target_roll)
+    }
+
+    /// Counts how many oriented hull-perimeter probes intersect solid obstacles `>= 2` voxels
+    /// (`> 0.65 m`) above local track clearance, such as buildings, rocks, walls, tree trunks, or cliffs.
+    fn count_hull_collisions(&self, world: &VoxelWorld, cx: f32, cz: f32, yaw: f32) -> usize {
+        let hw = self.config.hull_half_width;
+        let hl = self.config.hull_half_length;
+        let sin_y = yaw.sin();
+        let cos_y = yaw.cos();
+        let sin_p = self.hull_pitch.sin();
+        let sin_r = self.hull_roll.sin();
+        let inv_vs = 1.0 / world.voxel_size;
+
+        // 16 tightly spaced perimeter probes so even single-voxel (0.5 m) pillars/trunks cannot slip through
+        let perimeter: [(f32, f32); 16] = [
+            // Front bumper
+            (-hw, -hl),
+            (-hw * 0.5, -hl),
+            (0.0, -hl),
+            (hw * 0.5, -hl),
+            (hw, -hl),
+            // Rear bumper
+            (-hw, hl),
+            (-hw * 0.5, hl),
+            (0.0, hl),
+            (hw * 0.5, hl),
+            (hw, hl),
+            // Left track flank
+            (-hw, -hl * 0.5),
+            (-hw, 0.0),
+            (-hw, hl * 0.5),
+            // Right track flank
+            (hw, -hl * 0.5),
+            (hw, 0.0),
+            (hw, hl * 0.5),
+        ];
+
+        let mut hits = 0usize;
+        for &(lx, lz) in &perimeter {
+            let wx = cx + lx * cos_y + lz * sin_y;
+            let wz = cz - lx * sin_y + lz * cos_y;
+            let probe_ground = self.position.y - lz * sin_p + lx * sin_r;
+            // Use the higher of hull center or sloped probe plane so a nose-down dip entering an
+            // uphill valley transition never treats a climbable 1-voxel (0.5 m) step as a wall.
+            let ref_y = self.position.y.max(probe_ground);
+            let vx = (wx * inv_vs).floor() as i32;
+            let vz = (wz * inv_vs).floor() as i32;
+
+            // Check 3 vertical bands above 1-voxel (0.5 m) step clearance: blocks walls/buildings/
+            // boulders/parapets/trunks >= 2 voxels (1.0 m) tall while staying below tree canopies.
+            let mut blocked = false;
+            for dy in [0.75f32, 1.25, 1.75] {
+                let vy = ((ref_y + dy) * inv_vs).floor() as i32;
+                if world.is_solid(IVec3::new(vx, vy, vz)) {
+                    blocked = true;
+                    break;
+                }
+            }
+            if blocked {
+                hits += 1;
+            }
+        }
+        hits
     }
 
     fn update_turret_and_gun(&mut self, dt: f32, aim_world_point: Vec3) {
@@ -350,6 +543,40 @@ impl TankState {
         self.gun_pitch_local = (self.gun_pitch_local
             + pitch_err.clamp(-max_pitch_step, max_pitch_step))
         .clamp(self.config.gun_min_pitch, self.config.gun_max_pitch);
+    }
+}
+
+/// Bilinearly interpolates driveable voxel ground height around `(wx, wz)` near `ref_y` so
+/// 0.5 m voxel terrain stairs drive like continuous hills without vertical snapping jitter.
+fn sample_smooth_ground(world: &VoxelWorld, wx: f32, wz: f32, ref_y: f32) -> Option<f32> {
+    let vs = world.voxel_size;
+    let gx = wx / vs - 0.5;
+    let gz = wz / vs - 0.5;
+    let ix = gx.floor();
+    let iz = gz.floor();
+    let fx = (gx - ix).clamp(0.0, 1.0);
+    let fz = (gz - iz).clamp(0.0, 1.0);
+
+    let samples = [
+        ((ix + 0.5) * vs, (iz + 0.5) * vs, (1.0 - fx) * (1.0 - fz)),
+        ((ix + 1.5) * vs, (iz + 0.5) * vs, fx * (1.0 - fz)),
+        ((ix + 0.5) * vs, (iz + 1.5) * vs, (1.0 - fx) * fz),
+        ((ix + 1.5) * vs, (iz + 1.5) * vs, fx * fz),
+    ];
+
+    let mut sum = 0.0f32;
+    let mut w_sum = 0.0f32;
+    for &(sx, sz, w) in &samples {
+        if let Some(h) = world.ground_height_near(sx, sz, ref_y, 0.75, 2.2) {
+            sum += h * w;
+            w_sum += w;
+        }
+    }
+
+    if w_sum > 1e-4 {
+        Some(sum / w_sum)
+    } else {
+        world.ground_height_near(wx, wz, ref_y, 0.75, 2.5)
     }
 }
 

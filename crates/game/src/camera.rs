@@ -1,6 +1,7 @@
 use std::f32::consts::FRAC_PI_2;
 
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
+use bevy::pbr::{DistanceFog, FogFalloff};
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use voxel::raycast_world;
@@ -59,29 +60,38 @@ impl Plugin for CameraPlugin {
     }
 }
 
-fn setup_scene_lighting_and_camera(mut commands: Commands) {
-    // Crisp clear proving-ground sky
-    commands.insert_resource(ClearColor(Color::srgb(0.56, 0.72, 0.88)));
+fn setup_scene_lighting_and_camera(
+    mut commands: Commands,
+    sim: Res<SimResource>,
+    mut cam_ctrl: ResMut<TankCameraController>,
+) {
+    // Align initial camera orbit direction with the player tank's spawn heading
+    cam_ctrl.yaw = sim.0.player_tank.hull_yaw;
+
+    // Warm sunlit European valley sky matching horizon fog
+    commands.insert_resource(ClearColor(Color::srgb(0.62, 0.76, 0.88)));
 
     // Soft sky/ground ambient bounce light
     commands.insert_resource(GlobalAmbientLight {
-        color: Color::srgb(0.84, 0.88, 0.96),
-        brightness: 420.0,
+        color: Color::srgb(0.84, 0.89, 0.96),
+        brightness: 450.0,
         affects_lightmapped_meshes: true,
     });
 
-    // Primary sun directional light with crisp shadows
+    // Primary afternoon sun directional light with crisp shadows across hills & village
     commands.spawn((
         DirectionalLight {
-            illuminance: 14_000.0,
+            illuminance: 15_500.0,
             shadow_maps_enabled: true,
-            color: Color::srgb(1.0, 0.97, 0.90),
+            color: Color::srgb(1.0, 0.96, 0.88),
             ..default()
         },
-        Transform::from_xyz(65.0, 110.0, 50.0).looking_at(Vec3::ZERO, Vec3::Y),
+        Transform::from_xyz(110.0, 155.0, 85.0).looking_at(Vec3::ZERO, Vec3::Y),
     ));
 
-    // Main 3D tank camera
+    let spawn_pos = to_bevy_vec3(sim.0.player_tank.position);
+
+    // Main 3D tank camera with atmospheric distance fog for valley depth perception
     commands.spawn((
         MainTankCamera,
         Camera3d::default(),
@@ -91,7 +101,17 @@ fn setup_scene_lighting_and_camera(mut commands: Commands) {
             far: 900.0,
             ..default()
         }),
-        Transform::from_xyz(0.0, 5.5, 11.5).looking_at(Vec3::new(0.0, 1.8, 0.0), Vec3::Y),
+        DistanceFog {
+            color: Color::srgba(0.66, 0.78, 0.88, 1.0),
+            directional_light_color: Color::srgba(1.0, 0.95, 0.84, 0.35),
+            directional_light_exponent: 24.0,
+            falloff: FogFalloff::Linear {
+                start: 125.0,
+                end: 370.0,
+            },
+        },
+        Transform::from_translation(spawn_pos + Vec3::new(0.0, 5.5, 11.5))
+            .looking_at(spawn_pos + Vec3::new(0.0, 1.8, 0.0), Vec3::Y),
     ));
 }
 
@@ -182,8 +202,27 @@ fn update_camera_and_aim(
     match cam_ctrl.mode {
         CameraMode::ThirdPerson => {
             let pivot = to_bevy_vec3(tank.turret_world_position()) + Vec3::new(0.0, 1.35, 0.0);
-            let mut cam_pos = pivot - look_dir * cam_ctrl.distance;
-            cam_pos.y = cam_pos.y.max(0.65);
+
+            // Prevent camera from clipping inside houses, boulders, or hillsides via voxel raycast
+            let mut safe_dist = cam_ctrl.distance;
+            if let Some(hit) = raycast_world(
+                &sim.0.voxels,
+                to_sim_vec3(pivot),
+                to_sim_vec3(-look_dir),
+                cam_ctrl.distance + 0.6,
+            ) {
+                safe_dist = (hit.distance - 0.55).clamp(1.9, cam_ctrl.distance);
+            }
+
+            let mut cam_pos = pivot - look_dir * safe_dist;
+            // Keep camera above local voxel terrain height
+            if let Some(ground_y) = sim
+                .0
+                .voxels
+                .ground_height_near(cam_pos.x, cam_pos.z, pivot.y + 3.0, 5.0, 18.0)
+            {
+                cam_pos.y = cam_pos.y.max(ground_y + 0.65);
+            }
 
             cam_tf.translation = cam_pos;
             cam_tf.look_at(pivot + look_dir * 40.0, Vec3::Y);

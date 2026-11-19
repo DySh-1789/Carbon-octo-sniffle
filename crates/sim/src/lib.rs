@@ -3,13 +3,17 @@ pub mod map_gen;
 pub mod tank;
 
 pub use ballistics::{FIXED_DT, GRAVITY, ImpactEvent, Projectile, SimWorld};
-pub use map_gen::generate_flat_proving_ground;
+pub use map_gen::{
+    CaptureZoneDef, MapMetadata, MinimapData, TacticalPosition, TacticalPositionKind,
+    default_metadata_for_world, generate_european_valley_map, generate_flat_proving_ground,
+    generate_minimap_data,
+};
 pub use tank::{FiredShot, TankConfig, TankInput, TankState, wrap_angle};
 
 #[cfg(test)]
 mod tests {
-    use voxel::build_basic_tank_models;
-    use voxel::glam::Vec3;
+    use voxel::glam::{IVec3, Vec3};
+    use voxel::{VoxelId, build_basic_tank_models};
 
     use super::*;
 
@@ -155,5 +159,175 @@ mod tests {
             hit.position
         );
         assert!(sim.projectiles.is_empty());
+    }
+
+    #[test]
+    fn european_valley_generates_hills_buildings_bridge_and_minimap() {
+        let (world, meta) = generate_european_valley_map();
+        assert_eq!(meta.id, "european_valley");
+        assert!((meta.size_m - 384.0).abs() < 0.1);
+        assert_eq!(meta.capture_zones.len(), 3);
+        assert!(meta.spawn_allies.len() >= 4);
+        assert!(meta.spawn_axis.len() >= 4);
+        assert!(meta.tactical_positions.len() >= 5);
+
+        // Minimap pixel buffer matches size^2 * 4 RGBA bytes
+        assert_eq!(
+            meta.minimap.rgba.len(),
+            (meta.minimap.size * meta.minimap.size * 4) as usize
+        );
+
+        // Verify genuine elevation contrast: East Hill (Zone C) is notably higher than Village Square (Zone B)
+        let h_village = world.surface_height_at(0.0, 22.0).unwrap();
+        let h_east_hill = world.surface_height_at(108.0, 8.0).unwrap();
+        let h_west_ridge = world.surface_height_at(-108.0, -8.0).unwrap();
+        assert!(
+            h_east_hill > h_village + 4.5,
+            "east hill ({h_east_hill}) should tower above village ({h_village})"
+        );
+        assert!(
+            h_west_ridge > h_village + 3.0,
+            "west ridge ({h_west_ridge}) should sit above village ({h_village})"
+        );
+
+        // Verify tall bell-tower church landmark exists overlooking town square
+        let h_church = world.surface_height_at(23.5, 4.0).unwrap();
+        assert!(
+            h_church > h_village + 10.0,
+            "church bell tower ({h_church}) should rise well above ground ({h_village})"
+        );
+
+        // Verify player can spawn cleanly and drive along the south approach road without snagging
+        let models = build_basic_tank_models();
+        let mut sim = SimWorld::with_map(world, meta, TankConfig::stage1_basic(&models));
+        let start_z = sim.player_tank.position.z;
+        for _ in 0..180 {
+            sim.step_fixed(
+                FIXED_DT,
+                TankInput {
+                    throttle: 1.0,
+                    ..Default::default()
+                },
+            );
+        }
+        assert!(
+            sim.player_tank.position.z < start_z - 15.0,
+            "player should drive cleanly north from spawn along main road, start_z={start_z}, now={}",
+            sim.player_tank.position.z
+        );
+    }
+
+    #[test]
+    fn six_point_suspension_tilts_hull_on_voxel_ramp_and_slows_uphill() {
+        let mut world = generate_flat_proving_ground(64);
+        world.bounds_max.y = 16;
+
+        // Build a gentle climbable voxel ramp along -Z (steps up 0.5m every 3.0m ≈ 9.5 deg)
+        for step in 0..8 {
+            let z_max_vox = -14 - step * 6;
+            let z_min_vox = z_max_vox - 5;
+            world.fill_box(
+                IVec3::new(-16, 0, z_min_vox),
+                IVec3::new(16, step, z_max_vox),
+                VoxelId::DIRT,
+            );
+        }
+
+        let models = build_basic_tank_models();
+        let mut sim = SimWorld::new(world, TankConfig::stage1_basic(&models));
+
+        let mut max_pitch_seen = 0.0f32;
+        for _ in 0..240 {
+            sim.step_fixed(
+                FIXED_DT,
+                TankInput {
+                    throttle: 1.0,
+                    ..Default::default()
+                },
+            );
+            max_pitch_seen = max_pitch_seen.max(sim.player_tank.hull_pitch);
+        }
+
+        assert!(
+            sim.player_tank.position.y > 1.0,
+            "tank must climb the voxel ramp, y={}",
+            sim.player_tank.position.y
+        );
+        assert!(
+            max_pitch_seen > 0.08,
+            "6-point suspension must tilt hull nose up on ramp, max_pitch={max_pitch_seen}"
+        );
+    }
+
+    #[test]
+    fn tank_collides_with_brick_building_wall_and_does_not_pass_through() {
+        let mut world = generate_flat_proving_ground(64);
+        world.bounds_max.y = 12;
+
+        // Place a solid 3m-tall brick wall directly across the forward path at z = -10m (vz = -20)
+        world.fill_box(
+            IVec3::new(-16, 0, -22),
+            IVec3::new(16, 5, -20),
+            VoxelId::BRICK,
+        );
+
+        let models = build_basic_tank_models();
+        let mut sim = SimWorld::new(world, TankConfig::stage1_basic(&models));
+
+        for _ in 0..240 {
+            sim.step_fixed(
+                FIXED_DT,
+                TankInput {
+                    throttle: 1.0,
+                    ..Default::default()
+                },
+            );
+        }
+
+        // Wall front face is at z = -9.5m (vz = -20 spans [-10.0, -9.5]); hull front is 2.65m ahead
+        assert!(
+            sim.player_tank.position.z > -9.5,
+            "tank must be stopped by brick building wall, pos={:?}",
+            sim.player_tank.position
+        );
+        assert!(
+            sim.player_tank.forward_speed.abs() < 0.5,
+            "impact with perpendicular wall should halt forward speed, speed={}",
+            sim.player_tank.forward_speed
+        );
+    }
+
+    #[test]
+    fn tank_drives_full_highway_through_village_and_across_stone_bridge() {
+        let (world, meta) = generate_european_valley_map();
+        let models = build_basic_tank_models();
+        let mut sim = SimWorld::with_map(world, meta, TankConfig::stage1_basic(&models));
+
+        // Drive straight north along the main highway (X = 0) for 22 simulated seconds:
+        // South Spawn (Z = +148) -> Village Square (Z = +22) -> Stone Arch Bridge (Z = -38.5) -> North Bank (Z < -65)
+        for _ in 0..(22 * 60) {
+            sim.step_fixed(
+                FIXED_DT,
+                TankInput {
+                    throttle: 1.0,
+                    ..Default::default()
+                },
+            );
+        }
+
+        let probe_z = sim.player_tank.position.z - 2.65 - 0.1;
+        let front_h = sim.voxels.surface_height_at(0.0, probe_z);
+        let front_top = sim.voxels.top_solid_voxel_at(0, (probe_z * 2.0).floor() as i32);
+        assert!(
+            sim.player_tank.position.z < -65.0,
+            "tank should cleanly traverse village square and stone arch bridge onto north bank, stopped at {:?}, front_z={probe_z}, front_h={front_h:?}, front_top={front_top:?}",
+            sim.player_tank.position
+        );
+        // Verify bridge deck stays dry above water (Y > 0.5 at bridge center)
+        let bridge_y = sim.voxels.surface_height_at(0.0, -38.5).unwrap();
+        assert!(
+            bridge_y >= 1.4,
+            "stone arch bridge deck must rise well above stream water, got Y={bridge_y}"
+        );
     }
 }

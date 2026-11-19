@@ -224,6 +224,47 @@ impl VoxelWorld {
         }
     }
 
+    /// Fast unchecked voxel write used during batch map generation.
+    /// Caller must invoke [`Self::mark_all_dirty`] once generation finishes.
+    #[inline]
+    pub fn set_voxel_raw(&mut self, pos: IVec3, id: VoxelId) {
+        let (chunk_coord, (lx, ly, lz)) = Self::voxel_to_chunk_and_local(pos);
+        if id.is_air() && !self.chunks.contains_key(&chunk_coord) {
+            return;
+        }
+        let chunk = self.chunks.entry(chunk_coord).or_default();
+        chunk.set(lx, ly, lz, id);
+    }
+
+    /// Fast vertical column fill `(vx, y_min..=y_max, vz)` for terrain generation.
+    /// Caller must invoke [`Self::mark_all_dirty`] once generation finishes.
+    pub fn fill_column_raw(&mut self, vx: i32, vz: i32, y_min: i32, y_max: i32, id: VoxelId) {
+        if y_min > y_max {
+            return;
+        }
+        let cx = vx.div_euclid(CHUNK_SIZE_I32);
+        let cz = vz.div_euclid(CHUNK_SIZE_I32);
+        let lx = vx.rem_euclid(CHUNK_SIZE_I32) as usize;
+        let lz = vz.rem_euclid(CHUNK_SIZE_I32) as usize;
+
+        let mut y = y_min;
+        while y <= y_max {
+            let cy = y.div_euclid(CHUNK_SIZE_I32);
+            let chunk_coord = IVec3::new(cx, cy, cz);
+            let chunk_top = ((cy + 1) * CHUNK_SIZE_I32 - 1).min(y_max);
+            if id.is_air() && !self.chunks.contains_key(&chunk_coord) {
+                y = chunk_top + 1;
+                continue;
+            }
+            let chunk = self.chunks.entry(chunk_coord).or_default();
+            for vy in y..=chunk_top {
+                let ly = vy.rem_euclid(CHUNK_SIZE_I32) as usize;
+                chunk.set(lx, ly, lz, id);
+            }
+            y = chunk_top + 1;
+        }
+    }
+
     pub fn chunk(&self, coord: IVec3) -> Option<&VoxelChunk> {
         self.chunks.get(&coord)
     }
@@ -252,13 +293,52 @@ impl VoxelWorld {
         self.dirty_chunks.extend(self.chunks.keys().copied());
     }
 
+    /// Returns `(vy, material)` of the highest solid voxel in column `(vx, vz)`.
+    pub fn top_solid_voxel_at(&self, vx: i32, vz: i32) -> Option<(i32, VoxelId)> {
+        for vy in (self.bounds_min.y..=self.bounds_max.y).rev() {
+            let id = self.get_voxel(IVec3::new(vx, vy, vz));
+            if self.materials.is_solid(id) {
+                return Some((vy, id));
+            }
+        }
+        None
+    }
+
     /// Finds the world-space Y coordinate of the top face of the highest solid voxel at `(x, z)`
-    /// scanning downward from `max_y` to `bounds_min.y`.
+    /// scanning downward from `bounds_max.y` to `bounds_min.y`.
     pub fn surface_height_at(&self, world_x: f32, world_z: f32) -> Option<f32> {
         let vx = (world_x / self.voxel_size).floor() as i32;
         let vz = (world_z / self.voxel_size).floor() as i32;
-        for vy in (self.bounds_min.y..=self.bounds_max.y).rev() {
-            if self.is_solid(IVec3::new(vx, vy, vz)) {
+        self.top_solid_voxel_at(vx, vz)
+            .map(|(vy, _)| (vy + 1) as f32 * self.voxel_size)
+    }
+
+    /// Finds the nearest driveable ground surface around `ref_y` within `[ref_y - max_drop, ref_y + max_step_up]`.
+    ///
+    /// Requires 2 open air voxels (`1.0 m` at standard world scale) directly above the surface so
+    /// interiors of walls, overhanging tree canopies, and roofs are ignored when sampling ground height.
+    pub fn ground_height_near(
+        &self,
+        world_x: f32,
+        world_z: f32,
+        ref_y: f32,
+        max_step_up: f32,
+        max_drop: f32,
+    ) -> Option<f32> {
+        let vx = (world_x / self.voxel_size).floor() as i32;
+        let vz = (world_z / self.voxel_size).floor() as i32;
+        let top_vy = (((ref_y + max_step_up) / self.voxel_size).floor() as i32 - 1)
+            .min(self.bounds_max.y);
+        let bottom_vy = ((((ref_y - max_drop) / self.voxel_size).ceil() as i32) - 1)
+            .max(self.bounds_min.y);
+        if top_vy < bottom_vy {
+            return None;
+        }
+        for vy in (bottom_vy..=top_vy).rev() {
+            if self.is_solid(IVec3::new(vx, vy, vz))
+                && !self.is_solid(IVec3::new(vx, vy + 1, vz))
+                && !self.is_solid(IVec3::new(vx, vy + 2, vz))
+            {
                 return Some((vy + 1) as f32 * self.voxel_size);
             }
         }

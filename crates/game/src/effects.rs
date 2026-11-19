@@ -240,11 +240,12 @@ fn spawn_shot_and_impact_effects(
             },
         ));
 
-        // Flying voxel dirt chunks & rising dust column
+        // Flying voxel debris & rising dust column oriented along hit normal (ground or building wall)
         for i in 0..10 {
             let angle = i as f32 * std::f32::consts::TAU / 10.0;
-            let spread = 2.5 + (i % 3) as f32 * 1.4;
-            let vel = Vec3::new(angle.cos() * spread, 5.5 + (i % 4) as f32 * 2.2, angle.sin() * spread);
+            let spread = 2.4 + (i % 3) as f32 * 1.4;
+            let vel = up * (4.2 + (i % 4) as f32 * 1.8)
+                + Vec3::new(angle.cos() * spread, 1.5, angle.sin() * spread);
             let is_smoke = i % 2 == 0;
             commands.spawn((
                 Mesh3d(assets.puff_mesh.clone()),
@@ -283,7 +284,7 @@ fn tick_transient_effects(
         }
         p.velocity.y -= p.gravity * dt;
         tf.translation += p.velocity * dt;
-        tf.translation.y = tf.translation.y.max(0.05);
+        tf.translation.y = tf.translation.y.max(-4.0);
 
         let t = (p.age / p.lifetime).clamp(0.0, 1.0);
         let s = p.start_scale.lerp(p.end_scale, t);

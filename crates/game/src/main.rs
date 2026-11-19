@@ -16,7 +16,7 @@ fn main() {
                 })
                 .set(WindowPlugin {
                     primary_window: Some(Window {
-                        title: "Carbon Armor — Stage 1 (Proving Ground)".into(),
+                        title: "Carbon Armor — Stage 2 (European Valley)".into(),
                         resolution: WindowResolution::new(1280, 720),
                         canvas: Some("#bevy-canvas".into()),
                         fit_canvas_to_parent: true,
