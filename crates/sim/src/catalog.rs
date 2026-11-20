@@ -116,9 +116,9 @@ impl VehicleSpec {
         self.engine_hp / self.mass_tons.max(1.0)
     }
 
-    /// Builds the `0.2 m` voxel 3D model assembly for this vehicle.
+    /// Builds the high-detail `0.10 m` bespoke voxel 3D model assembly for this vehicle.
     pub fn build_models(&self) -> TankVoxelModels {
-        build_tank_models(&self.blueprint)
+        voxel::build_vehicle_models(&self.id).unwrap_or_else(|| build_tank_models(&self.blueprint))
     }
 
     /// Converts this historical specification + its voxel model mounts into a simulation [`TankConfig`].

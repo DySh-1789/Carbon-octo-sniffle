@@ -2,6 +2,7 @@ pub mod battle_sync;
 pub mod bridge;
 pub mod camera;
 pub mod effects;
+pub mod flags;
 pub mod hangar_ui;
 pub mod hud;
 pub mod state;
@@ -13,6 +14,7 @@ use bevy::prelude::*;
 use crate::battle_sync::{BattleSimPlugin, PlayerInputPlugin};
 use crate::camera::CameraPlugin;
 use crate::effects::EffectsPlugin;
+use crate::flags::setup_flag_textures;
 use crate::hangar_ui::HangarPlugin;
 use crate::hud::HudPlugin;
 use crate::state::{
@@ -27,7 +29,7 @@ pub struct TankGamePlugin;
 impl Plugin for TankGamePlugin {
     fn build(&self, app: &mut App) {
         app.init_state::<AppState>()
-            .add_systems(Startup, setup_tank_paint_materials)
+            .add_systems(Startup, (setup_tank_paint_materials, setup_flag_textures))
             .add_systems(OnExit(AppState::Hangar), despawn_tagged::<HangarEntity>)
             .add_systems(OnExit(AppState::InBattle), despawn_tagged::<BattleEntity>)
             .add_plugins((

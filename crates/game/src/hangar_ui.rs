@@ -6,6 +6,7 @@ use sim::{Nation, VehicleSpec, tier_roman};
 use voxel::mesh_voxel_model;
 
 use crate::bridge::{SimResource, to_bevy_vec3};
+use crate::flags::FlagTextures;
 use crate::state::{
     AppState, CatalogResource, HangarEntity, HangarViewMode, SelectedVehicle, TankPaintMaterials,
     nation_accent_color,
@@ -30,9 +31,9 @@ struct HangarOrbitState {
 impl Default for HangarOrbitState {
     fn default() -> Self {
         Self {
-            yaw: 0.62,
-            pitch: 0.24,
-            distance: 9.6,
+            yaw: 0.48,
+            pitch: 0.21,
+            distance: 8.8,
             auto_rotate: true,
         }
     }
@@ -115,9 +116,9 @@ fn setup_hangar_scene(
         cursor.visible = true;
     }
 
-    orbit.yaw = 0.62;
-    orbit.pitch = 0.24;
-    orbit.distance = 9.6;
+    orbit.yaw = 0.48;
+    orbit.pitch = 0.21;
+    orbit.distance = 8.8;
     orbit.auto_rotate = true;
     selected.preview_dirty = true;
 
@@ -161,6 +162,17 @@ fn setup_hangar_scene(
             ..default()
         },
         Transform::from_xyz(7.5, 4.2, 7.0),
+    ));
+    // Soft lower front-fill key light illuminating frontal glacis, driver visor, bow MG, headlights & mantlet
+    commands.spawn((
+        HangarEntity,
+        PointLight {
+            color: Color::srgb(0.98, 0.94, 0.88),
+            intensity: 280_000.0,
+            range: 22.0,
+            ..default()
+        },
+        Transform::from_xyz(-2.0, 2.2, 6.8),
     ));
 
     // Hangar bay architecture: dark concrete floor, circular steel turntable podium, glowing amber ring & I-beam pillars
@@ -256,7 +268,7 @@ fn setup_hangar_scene(
             far: 140.0,
             ..default()
         }),
-        Transform::from_xyz(6.0, 3.6, 7.6).looking_at(Vec3::new(0.0, 1.35, 0.0), Vec3::Y),
+        Transform::from_xyz(3.97, 2.98, 7.63).looking_at(Vec3::new(0.0, 1.15, 0.0), Vec3::Y),
     ));
 }
 
@@ -298,18 +310,20 @@ fn rebuild_showcase_tank_if_dirty(
     )));
     let mat = paints.material_for(spec.nation, spec.tier);
 
-    // Slight heroic turret turn (for turreted tanks) so the silhouette pops on the podium
+    // Slight heroic turret turn (for turreted tanks) toward the camera so the silhouette pops on the podium
     let turret_pose_yaw = if spec.turret_yaw_limit_deg.is_some() {
         0.0
     } else {
-        -0.18
+        0.16
     };
 
     commands
         .spawn((
             HangarEntity,
             HangarShowcaseTank,
-            Transform::from_xyz(0.0, 0.24, 0.0).with_rotation(Quat::from_rotation_y(-0.35)),
+            // Tank local forward is -Z; rotate by PI - 0.35 so front glacis, visor, headlights & mantlet face the front-3/4 camera
+            Transform::from_xyz(0.0, 0.24, 0.0)
+                .with_rotation(Quat::from_rotation_y(std::f32::consts::PI - 0.35)),
             Visibility::default(),
         ))
         .with_children(|hull| {
@@ -377,52 +391,52 @@ fn update_hangar_orbit_camera(
     tf.look_at(pivot, Vec3::Y);
 }
 
-fn spawn_mini_flag(parent: &mut ChildSpawnerCommands, nation: Nation, width: f32, height: f32) {
-    let stripe_h = height / 3.0;
-    let bands: [Color; 3] = match nation {
-        Nation::Usa => [
-            Color::srgb(0.14, 0.28, 0.62),
-            Color::srgb(0.92, 0.92, 0.94),
-            Color::srgb(0.78, 0.18, 0.20),
-        ],
-        Nation::Germany => [
-            Color::srgb(0.12, 0.12, 0.14),
-            Color::srgb(0.80, 0.16, 0.16),
-            Color::srgb(0.94, 0.76, 0.18),
-        ],
-        Nation::Ussr => [
-            Color::srgb(0.78, 0.12, 0.14),
-            Color::srgb(0.96, 0.78, 0.18),
-            Color::srgb(0.74, 0.10, 0.12),
-        ],
-    };
-
+fn spawn_mini_flag(
+    parent: &mut ChildSpawnerCommands,
+    flags: &FlagTextures,
+    nation: Nation,
+    width: f32,
+    height: f32,
+) {
     parent
         .spawn((
             Node {
-                width: Val::Px(width),
-                height: Val::Px(height),
-                flex_direction: FlexDirection::Column,
+                width: Val::Px(width + 2.0),
+                height: Val::Px(height + 2.0),
                 border: UiRect::all(Val::Px(1.0)),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
                 ..default()
             },
-            BorderColor::all(Color::srgba(0.85, 0.88, 0.92, 0.45)),
+            BorderColor::all(Color::srgba(0.86, 0.90, 0.96, 0.58)),
+            BackgroundColor(Color::srgba(0.04, 0.05, 0.08, 0.95)),
         ))
-        .with_children(|flag| {
-            for col in bands {
-                flag.spawn((
-                    Node {
-                        width: Val::Percent(100.0),
-                        height: Val::Px(stripe_h),
-                        ..default()
-                    },
-                    BackgroundColor(col),
-                ));
-            }
+        .with_children(|frame| {
+            frame.spawn((
+                Node {
+                    width: Val::Px(width),
+                    height: Val::Px(height),
+                    ..default()
+                },
+                ImageNode::new(flags.handle(nation)),
+            ));
         });
 }
 
-fn setup_hangar_ui(mut commands: Commands) {
+fn setup_hangar_ui(
+    mut commands: Commands,
+    flags: Option<Res<FlagTextures>>,
+    mut images: ResMut<Assets<Image>>,
+) {
+    // Bevy 0.20 runs initial `OnEnter(AppState::Hangar)` before `Startup`, so ensure flag textures exist immediately.
+    let flags = match flags {
+        Some(existing) => existing.clone(),
+        None => {
+            let created = FlagTextures::from_images(&mut images);
+            commands.insert_resource(created.clone());
+            created
+        }
+    };
     // =========================================================================
     // LAYER 1: INDUSTRIAL HANGAR PODIUM OVERLAY (matching WoT 2.0 reference)
     // =========================================================================
@@ -590,7 +604,7 @@ fn setup_hangar_ui(mut commands: Commands) {
                         BackgroundColor(Color::srgba(0.10, 0.13, 0.17, 0.88)),
                     ))
                     .with_children(|btn| {
-                        spawn_mini_flag(btn, nation, 22.0, 15.0);
+                        spawn_mini_flag(btn, &flags, nation, 28.0, 18.0);
                         btn.spawn((
                             Text::new(nation.label()),
                             TextFont {
@@ -816,7 +830,7 @@ fn setup_hangar_ui(mut commands: Commands) {
                         BackgroundColor(Color::srgba(0.10, 0.14, 0.19, 0.92)),
                     ))
                     .with_children(|btn| {
-                        spawn_mini_flag(btn, nation, 54.0, 33.0);
+                        spawn_mini_flag(btn, &flags, nation, 64.0, 40.0);
                         btn.spawn((
                             Text::new(nation.label()),
                             TextFont {

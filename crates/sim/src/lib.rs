@@ -934,9 +934,14 @@ mod tests {
         assert!(t44.shell.caliber_mm >= 100.0);
         assert!(t44.shell.penetration_0m_mm >= 200.0);
 
-        // Every single vehicle's voxel blueprint must build non-empty U16 meshes
+        // Every single vehicle's bespoke 0.10 m voxel model must exist and build non-empty U16 meshes
         let materials = voxel::MaterialRegistry::default();
         for spec in catalog.all() {
+            assert!(
+                voxel::build_vehicle_models(&spec.id).is_some(),
+                "{} must have a bespoke 0.10 m voxel sculptor",
+                spec.id
+            );
             let models = spec.build_models();
             let hull_mesh = voxel::mesh_voxel_model(&models.hull, &materials);
             let turret_mesh = voxel::mesh_voxel_model(&models.turret, &materials);

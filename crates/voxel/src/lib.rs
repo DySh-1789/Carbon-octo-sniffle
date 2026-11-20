@@ -3,6 +3,7 @@ pub mod material;
 pub mod mesher;
 pub mod model;
 pub mod raycast;
+pub mod tanks;
 
 pub use chunk::{CHUNK_SIZE, CHUNK_SIZE_I32, TANK_VOXEL_SIZE, VoxelChunk, VoxelWorld, WORLD_VOXEL_SIZE};
 pub use glam;
@@ -13,6 +14,7 @@ pub use model::{
     VoxelTankBlueprint, build_basic_tank_models, build_tank_models,
 };
 pub use raycast::{VoxelHit, raycast_world};
+pub use tanks::{DETAIL_VOXEL_SIZE, build_vehicle_models};
 
 #[cfg(test)]
 mod tests {

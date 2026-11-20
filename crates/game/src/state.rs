@@ -58,30 +58,18 @@ pub struct HangarEntity;
 #[derive(Component)]
 pub struct BattleEntity;
 
-/// Shared PBR material palette for authentic WWII national armor paints + charred wrecks.
-/// Keeps total tank material count fixed at 5 handles across Hangar and 6v6 Battle.
+/// Shared PBR material palette for live armored vehicles + charred wrecks.
+/// National armor paints, emblems, headlights, tracks, and tools are baked directly into
+/// vertex colors at `0.10 m` voxel resolution so live tanks share a single neutral PBR material!
 #[derive(Resource)]
 pub struct TankPaintMaterials {
-    pub us_olive: Handle<StandardMaterial>,
-    pub de_panzer_grey: Handle<StandardMaterial>,
-    pub de_dunkelgelb: Handle<StandardMaterial>,
-    pub su_4bo_green: Handle<StandardMaterial>,
+    pub live_armor: Handle<StandardMaterial>,
     pub wreck_charred: Handle<StandardMaterial>,
 }
 
 impl TankPaintMaterials {
-    pub fn material_for(&self, nation: Nation, tier: u8) -> Handle<StandardMaterial> {
-        match nation {
-            Nation::Usa => self.us_olive.clone(),
-            Nation::Germany => {
-                if tier <= 3 {
-                    self.de_panzer_grey.clone()
-                } else {
-                    self.de_dunkelgelb.clone()
-                }
-            }
-            Nation::Ussr => self.su_4bo_green.clone(),
-        }
+    pub fn material_for(&self, _nation: Nation, _tier: u8) -> Handle<StandardMaterial> {
+        self.live_armor.clone()
     }
 }
 
@@ -94,37 +82,16 @@ pub fn nation_accent_color(nation: Nation) -> Color {
     }
 }
 
-/// Spawns the 5 shared national & wreck PBR tank materials once on Startup.
+/// Spawns the 2 shared PBR tank materials (`live_armor` + `wreck_charred`) once on Startup.
 pub fn setup_tank_paint_materials(
     mut commands: Commands,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    let us_olive = materials.add(StandardMaterial {
-        base_color: Color::linear_rgb(0.96, 1.00, 0.84),
-        perceptual_roughness: 0.66,
+    let live_armor = materials.add(StandardMaterial {
+        base_color: Color::WHITE,
+        perceptual_roughness: 0.62,
         metallic: 0.24,
-        reflectance: 0.34,
-        ..default()
-    });
-    let de_panzer_grey = materials.add(StandardMaterial {
-        base_color: Color::linear_rgb(0.68, 0.74, 0.86),
-        perceptual_roughness: 0.60,
-        metallic: 0.32,
-        reflectance: 0.38,
-        ..default()
-    });
-    let de_dunkelgelb = materials.add(StandardMaterial {
-        base_color: Color::linear_rgb(1.48, 1.24, 0.78),
-        perceptual_roughness: 0.64,
-        metallic: 0.26,
-        reflectance: 0.35,
-        ..default()
-    });
-    let su_4bo_green = materials.add(StandardMaterial {
-        base_color: Color::linear_rgb(0.76, 1.12, 0.66),
-        perceptual_roughness: 0.68,
-        metallic: 0.22,
-        reflectance: 0.32,
+        reflectance: 0.36,
         ..default()
     });
     let wreck_charred = materials.add(StandardMaterial {
@@ -136,10 +103,7 @@ pub fn setup_tank_paint_materials(
     });
 
     commands.insert_resource(TankPaintMaterials {
-        us_olive,
-        de_panzer_grey,
-        de_dunkelgelb,
-        su_4bo_green,
+        live_armor,
         wreck_charred,
     });
 }

@@ -34,6 +34,22 @@ impl VoxelId {
     pub const TREE_TRUNK: Self = Self(25);
     pub const LEAVES: Self = Self(26);
     pub const WINDOW_DARK: Self = Self(27);
+    // High-detail Stage 5 national armor paints & vehicle detail materials (0.10 m tank scale)
+    pub const ARMOR_US: Self = Self(28);
+    pub const ARMOR_US_DARK: Self = Self(29);
+    pub const ARMOR_DE_GREY: Self = Self(30);
+    pub const ARMOR_DE_GREY_DARK: Self = Self(31);
+    pub const ARMOR_DE_TAN: Self = Self(32);
+    pub const ARMOR_DE_TAN_DARK: Self = Self(33);
+    pub const ARMOR_SU: Self = Self(34);
+    pub const ARMOR_SU_DARK: Self = Self(35);
+    pub const STEEL_DARK_TRIM: Self = Self(36);
+    pub const HEADLIGHT_GLASS: Self = Self(37);
+    pub const EXHAUST_RUST: Self = Self(38);
+    pub const WOOD_TOOL: Self = Self(39);
+    pub const EMBLEM_WHITE: Self = Self(40);
+    pub const EMBLEM_RED: Self = Self(41);
+    pub const EMBLEM_BLACK: Self = Self(42);
 
     #[inline]
     pub const fn is_air(self) -> bool {
@@ -356,6 +372,156 @@ impl MaterialRegistry {
                 durability: 25.0,
                 blast_resistance: 0.5,
                 armor_equiv_mm: 2.0,
+                color_jitter: 0.0,
+            },
+            // 28: ARMOR_US (WWII US Olive Drab No. 9)
+            VoxelMaterial {
+                name: "ArmorUS",
+                base_color: [0.31, 0.34, 0.22, 1.0],
+                is_solid: true,
+                durability: 500.0,
+                blast_resistance: 20.0,
+                armor_equiv_mm: 80.0,
+                color_jitter: 0.0,
+            },
+            // 29: ARMOR_US_DARK (US cast/shaded Olive Drab)
+            VoxelMaterial {
+                name: "ArmorUSDdark",
+                base_color: [0.22, 0.25, 0.16, 1.0],
+                is_solid: true,
+                durability: 500.0,
+                blast_resistance: 20.0,
+                armor_equiv_mm: 80.0,
+                color_jitter: 0.0,
+            },
+            // 30: ARMOR_DE_GREY (Wehrmacht RAL 7021 Dunkelgrau / Panzergrau)
+            VoxelMaterial {
+                name: "ArmorDEGrey",
+                base_color: [0.27, 0.30, 0.34, 1.0],
+                is_solid: true,
+                durability: 500.0,
+                blast_resistance: 20.0,
+                armor_equiv_mm: 80.0,
+                color_jitter: 0.0,
+            },
+            // 31: ARMOR_DE_GREY_DARK (Shaded Panzergrau)
+            VoxelMaterial {
+                name: "ArmorDEGreyDark",
+                base_color: [0.19, 0.21, 0.25, 1.0],
+                is_solid: true,
+                durability: 500.0,
+                blast_resistance: 20.0,
+                armor_equiv_mm: 80.0,
+                color_jitter: 0.0,
+            },
+            // 32: ARMOR_DE_TAN (Wehrmacht RAL 7028 Dunkelgelb)
+            VoxelMaterial {
+                name: "ArmorDETan",
+                base_color: [0.58, 0.50, 0.32, 1.0],
+                is_solid: true,
+                durability: 500.0,
+                blast_resistance: 20.0,
+                armor_equiv_mm: 80.0,
+                color_jitter: 0.0,
+            },
+            // 33: ARMOR_DE_TAN_DARK (Shaded Dunkelgelb / camo trim)
+            VoxelMaterial {
+                name: "ArmorDETanDark",
+                base_color: [0.42, 0.36, 0.22, 1.0],
+                is_solid: true,
+                durability: 500.0,
+                blast_resistance: 20.0,
+                armor_equiv_mm: 80.0,
+                color_jitter: 0.0,
+            },
+            // 34: ARMOR_SU (Soviet 4BO Protective Green)
+            VoxelMaterial {
+                name: "ArmorSU",
+                base_color: [0.24, 0.36, 0.19, 1.0],
+                is_solid: true,
+                durability: 500.0,
+                blast_resistance: 20.0,
+                armor_equiv_mm: 80.0,
+                color_jitter: 0.0,
+            },
+            // 35: ARMOR_SU_DARK (Shaded 4BO Green)
+            VoxelMaterial {
+                name: "ArmorSUDark",
+                base_color: [0.16, 0.25, 0.13, 1.0],
+                is_solid: true,
+                durability: 500.0,
+                blast_resistance: 20.0,
+                armor_equiv_mm: 80.0,
+                color_jitter: 0.0,
+            },
+            // 36: STEEL_DARK_TRIM (Gunmetal MG barrels, vision slits, tow hooks, grilles)
+            VoxelMaterial {
+                name: "SteelDarkTrim",
+                base_color: [0.13, 0.14, 0.15, 1.0],
+                is_solid: true,
+                durability: 400.0,
+                blast_resistance: 15.0,
+                armor_equiv_mm: 40.0,
+                color_jitter: 0.0,
+            },
+            // 37: HEADLIGHT_GLASS (Warm bright headlamp lens)
+            VoxelMaterial {
+                name: "HeadlightGlass",
+                base_color: [0.96, 0.92, 0.72, 1.0],
+                is_solid: true,
+                durability: 40.0,
+                blast_resistance: 1.0,
+                armor_equiv_mm: 4.0,
+                color_jitter: 0.0,
+            },
+            // 38: EXHAUST_RUST (Burnt iron exhaust pipes & spare track links)
+            VoxelMaterial {
+                name: "ExhaustRust",
+                base_color: [0.36, 0.20, 0.14, 1.0],
+                is_solid: true,
+                durability: 200.0,
+                blast_resistance: 6.0,
+                armor_equiv_mm: 18.0,
+                color_jitter: 0.0,
+            },
+            // 39: WOOD_TOOL (Soviet unditching log & pioneer tool handles)
+            VoxelMaterial {
+                name: "WoodTool",
+                base_color: [0.46, 0.32, 0.18, 1.0],
+                is_solid: true,
+                durability: 60.0,
+                blast_resistance: 2.0,
+                armor_equiv_mm: 8.0,
+                color_jitter: 0.0,
+            },
+            // 40: EMBLEM_WHITE (Allied star / Balkenkreuz white border / turret stripe)
+            VoxelMaterial {
+                name: "EmblemWhite",
+                base_color: [0.92, 0.92, 0.88, 1.0],
+                is_solid: true,
+                durability: 500.0,
+                blast_resistance: 20.0,
+                armor_equiv_mm: 80.0,
+                color_jitter: 0.0,
+            },
+            // 41: EMBLEM_RED (Soviet red star / rear tail lamps)
+            VoxelMaterial {
+                name: "EmblemRed",
+                base_color: [0.80, 0.14, 0.14, 1.0],
+                is_solid: true,
+                durability: 500.0,
+                blast_resistance: 20.0,
+                armor_equiv_mm: 80.0,
+                color_jitter: 0.0,
+            },
+            // 42: EMBLEM_BLACK (Balkenkreuz core / bore shadow / recessed engine vents)
+            VoxelMaterial {
+                name: "EmblemBlack",
+                base_color: [0.07, 0.07, 0.08, 1.0],
+                is_solid: true,
+                durability: 500.0,
+                blast_resistance: 20.0,
+                armor_equiv_mm: 80.0,
                 color_jitter: 0.0,
             },
         ];
