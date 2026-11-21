@@ -4,6 +4,7 @@ pub mod battle;
 pub mod catalog;
 pub mod damage;
 pub mod map_gen;
+pub mod maps;
 pub mod shell;
 pub mod sim_world;
 pub mod tank;
@@ -24,10 +25,11 @@ pub use damage::{
     raycast_tank_armor, resolve_ap_impact,
 };
 pub use map_gen::{
-    CaptureZoneDef, MapMetadata, MinimapData, TacticalPosition, TacticalPositionKind,
-    default_metadata_for_world, generate_european_valley_map, generate_flat_proving_ground,
-    generate_minimap_data,
+    CaptureZoneDef, MapAtmosphere, MapMetadata, MinimapData, TacticalPosition,
+    TacticalPositionKind, default_metadata_for_world, generate_european_valley_map,
+    generate_flat_proving_ground, generate_minimap_data,
 };
+pub use maps::{MapId, generate_map};
 pub use shell::{ShellKind, ShellSpec};
 pub use sim_world::SimWorld;
 pub use tank::{FiredShot, TankConfig, TankInput, TankState, wrap_angle};

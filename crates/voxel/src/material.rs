@@ -50,6 +50,18 @@ impl VoxelId {
     pub const EMBLEM_WHITE: Self = Self(40);
     pub const EMBLEM_RED: Self = Self(41);
     pub const EMBLEM_BLACK: Self = Self(42);
+    // Stage 6 biome materials (El Alamein, Stalingrad Winter, Karelia Ridge, Normandy Bocage)
+    pub const SAND: Self = Self(43);
+    pub const SAND_DARK: Self = Self(44);
+    pub const SANDSTONE: Self = Self(45);
+    pub const MUDBRICK: Self = Self(46);
+    pub const SNOW: Self = Self(47);
+    pub const SNOW_DARK: Self = Self(48);
+    pub const ICE: Self = Self(49);
+    pub const RUBBLE: Self = Self(50);
+    pub const PINE_LEAVES: Self = Self(51);
+    pub const GRANITE: Self = Self(52);
+    pub const BUNKER_CONCRETE: Self = Self(53);
 
     #[inline]
     pub const fn is_air(self) -> bool {
@@ -522,6 +534,116 @@ impl MaterialRegistry {
                 durability: 500.0,
                 blast_resistance: 20.0,
                 armor_equiv_mm: 80.0,
+                color_jitter: 0.0,
+            },
+            // 43: SAND (North African desert dunes)
+            VoxelMaterial {
+                name: "Sand",
+                base_color: [0.78, 0.67, 0.46, 1.0],
+                is_solid: true,
+                durability: 20.0,
+                blast_resistance: 0.9,
+                armor_equiv_mm: 4.0,
+                color_jitter: 0.022,
+            },
+            // 44: SAND_DARK (Packed desert trail / dune shadow)
+            VoxelMaterial {
+                name: "SandDark",
+                base_color: [0.65, 0.53, 0.35, 1.0],
+                is_solid: true,
+                durability: 24.0,
+                blast_resistance: 1.0,
+                armor_equiv_mm: 5.0,
+                color_jitter: 0.02,
+            },
+            // 45: SANDSTONE (Desert wadi rock & cliffs)
+            VoxelMaterial {
+                name: "Sandstone",
+                base_color: [0.62, 0.48, 0.32, 1.0],
+                is_solid: true,
+                durability: 175.0,
+                blast_resistance: 6.5,
+                armor_equiv_mm: 35.0,
+                color_jitter: 0.025,
+            },
+            // 46: MUDBRICK (North African adobe village walls)
+            VoxelMaterial {
+                name: "Mudbrick",
+                base_color: [0.74, 0.60, 0.42, 1.0],
+                is_solid: true,
+                durability: 80.0,
+                blast_resistance: 2.4,
+                armor_equiv_mm: 14.0,
+                color_jitter: 0.0,
+            },
+            // 47: SNOW (Winter snowpack)
+            VoxelMaterial {
+                name: "Snow",
+                base_color: [0.86, 0.89, 0.93, 1.0],
+                is_solid: true,
+                durability: 18.0,
+                blast_resistance: 0.8,
+                armor_equiv_mm: 3.0,
+                color_jitter: 0.018,
+            },
+            // 48: SNOW_DARK (Churning tank-tracked muddy winter snow)
+            VoxelMaterial {
+                name: "SnowDark",
+                base_color: [0.68, 0.72, 0.76, 1.0],
+                is_solid: true,
+                durability: 22.0,
+                blast_resistance: 1.0,
+                armor_equiv_mm: 5.0,
+                color_jitter: 0.02,
+            },
+            // 49: ICE (Frozen river sheet)
+            VoxelMaterial {
+                name: "Ice",
+                base_color: [0.62, 0.78, 0.88, 1.0],
+                is_solid: true,
+                durability: 45.0,
+                blast_resistance: 1.5,
+                armor_equiv_mm: 6.0,
+                color_jitter: 0.0,
+            },
+            // 50: RUBBLE (Bombed city brick & concrete debris)
+            VoxelMaterial {
+                name: "Rubble",
+                base_color: [0.43, 0.37, 0.34, 1.0],
+                is_solid: true,
+                durability: 110.0,
+                blast_resistance: 3.5,
+                armor_equiv_mm: 22.0,
+                color_jitter: 0.025,
+            },
+            // 51: PINE_LEAVES (Dark Nordic spruce/pine foliage)
+            VoxelMaterial {
+                name: "PineLeaves",
+                base_color: [0.14, 0.27, 0.16, 1.0],
+                is_solid: true,
+                durability: 12.0,
+                blast_resistance: 0.4,
+                armor_equiv_mm: 1.0,
+                color_jitter: 0.0,
+            },
+            // 52: GRANITE (Nordic Karelia grey-blue granite ridges & cliffs)
+            VoxelMaterial {
+                name: "Granite",
+                base_color: [0.40, 0.43, 0.47, 1.0],
+                is_solid: true,
+                durability: 260.0,
+                blast_resistance: 10.0,
+                armor_equiv_mm: 55.0,
+                color_jitter: 0.025,
+            },
+            // 53: BUNKER_CONCRETE (Atlantic Wall reinforced steel-concrete bunker)
+            VoxelMaterial {
+                name: "BunkerConcrete",
+                base_color: [0.49, 0.50, 0.47, 1.0],
+                is_solid: true,
+                durability: 360.0,
+                blast_resistance: 16.0,
+                armor_equiv_mm: 95.0,
                 color_jitter: 0.0,
             },
         ];

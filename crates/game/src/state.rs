@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use sim::{Nation, VehicleCatalog};
+use sim::{MapId, Nation, VehicleCatalog};
 
 /// Top-level application state: Industrial Hangar / Tech Tree vs live 6v6 Ground Battle.
 #[derive(States, Default, Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -29,11 +29,12 @@ impl Default for CatalogResource {
     }
 }
 
-/// Currently selected nation, vehicle, and Hangar UI mode.
+/// Currently selected nation, vehicle, battlefield map, and Hangar UI mode.
 #[derive(Resource, Clone, Debug)]
 pub struct SelectedVehicle {
     pub nation: Nation,
     pub vehicle_id: String,
+    pub map_id: MapId,
     pub view_mode: HangarViewMode,
     /// Set whenever `vehicle_id` changes so the 3D Hangar showcase tank rebuilds once.
     pub preview_dirty: bool,
@@ -44,6 +45,7 @@ impl Default for SelectedVehicle {
         Self {
             nation: Nation::Usa,
             vehicle_id: "us_m4a1".to_string(),
+            map_id: MapId::EuropeanValley,
             view_mode: HangarViewMode::Podium,
             preview_dirty: true,
         }

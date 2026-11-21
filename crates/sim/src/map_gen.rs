@@ -33,6 +33,98 @@ pub struct MinimapData {
     pub rgba: Vec<u8>,
 }
 
+/// Sky, distance fog, and sunlight color/intensity profile tailored per map biome.
+#[derive(Copy, Clone, Debug)]
+pub struct MapAtmosphere {
+    pub sky_rgb: [f32; 3],
+    pub fog_rgb: [f32; 3],
+    pub sun_rgb: [f32; 3],
+    pub sun_illuminance: f32,
+    pub sun_dir: [f32; 3],
+    pub ambient_rgb: [f32; 3],
+    pub ambient_brightness: f32,
+    pub fog_start: f32,
+    pub fog_end: f32,
+}
+
+impl Default for MapAtmosphere {
+    fn default() -> Self {
+        Self::european_valley()
+    }
+}
+
+impl MapAtmosphere {
+    pub const fn european_valley() -> Self {
+        Self {
+            sky_rgb: [0.62, 0.76, 0.88],
+            fog_rgb: [0.66, 0.78, 0.88],
+            sun_rgb: [1.0, 0.96, 0.88],
+            sun_illuminance: 15_500.0,
+            sun_dir: [110.0, 155.0, 85.0],
+            ambient_rgb: [0.84, 0.89, 0.96],
+            ambient_brightness: 450.0,
+            fog_start: 125.0,
+            fog_end: 370.0,
+        }
+    }
+
+    pub const fn el_alamein() -> Self {
+        Self {
+            sky_rgb: [0.86, 0.79, 0.64],
+            fog_rgb: [0.86, 0.77, 0.60],
+            sun_rgb: [1.0, 0.94, 0.78],
+            sun_illuminance: 18_500.0,
+            sun_dir: [120.0, 170.0, 60.0],
+            ambient_rgb: [0.96, 0.88, 0.72],
+            ambient_brightness: 540.0,
+            fog_start: 115.0,
+            fog_end: 350.0,
+        }
+    }
+
+    pub const fn stalingrad_winter() -> Self {
+        Self {
+            sky_rgb: [0.72, 0.77, 0.83],
+            fog_rgb: [0.74, 0.78, 0.83],
+            sun_rgb: [0.92, 0.95, 1.0],
+            sun_illuminance: 12_500.0,
+            sun_dir: [-95.0, 125.0, 90.0],
+            ambient_rgb: [0.82, 0.88, 0.95],
+            ambient_brightness: 520.0,
+            fog_start: 95.0,
+            fog_end: 320.0,
+        }
+    }
+
+    pub const fn karelia_ridge() -> Self {
+        Self {
+            sky_rgb: [0.54, 0.68, 0.80],
+            fog_rgb: [0.60, 0.72, 0.80],
+            sun_rgb: [0.98, 0.95, 0.88],
+            sun_illuminance: 14_200.0,
+            sun_dir: [95.0, 130.0, -90.0],
+            ambient_rgb: [0.76, 0.84, 0.92],
+            ambient_brightness: 440.0,
+            fog_start: 110.0,
+            fog_end: 345.0,
+        }
+    }
+
+    pub const fn normandy_bocage() -> Self {
+        Self {
+            sky_rgb: [0.66, 0.74, 0.80],
+            fog_rgb: [0.70, 0.76, 0.80],
+            sun_rgb: [0.96, 0.95, 0.90],
+            sun_illuminance: 14_000.0,
+            sun_dir: [-100.0, 145.0, 80.0],
+            ambient_rgb: [0.82, 0.86, 0.88],
+            ambient_brightness: 470.0,
+            fog_start: 105.0,
+            fog_end: 335.0,
+        }
+    }
+}
+
 /// Full tactical metadata for a playable battlefield.
 #[derive(Clone, Debug)]
 pub struct MapMetadata {
@@ -46,6 +138,7 @@ pub struct MapMetadata {
     pub capture_zones: Vec<CaptureZoneDef>,
     pub tactical_positions: Vec<TacticalPosition>,
     pub minimap: MinimapData,
+    pub atmosphere: MapAtmosphere,
 }
 
 impl MapMetadata {
@@ -184,6 +277,7 @@ pub fn default_metadata_for_world(world: &VoxelWorld, id: &str, name: &str) -> M
         capture_zones: Vec::new(),
         tactical_positions: Vec::new(),
         minimap,
+        atmosphere: MapAtmosphere::default(),
     }
 }
 
@@ -416,6 +510,7 @@ pub fn generate_european_valley_map() -> (VoxelWorld, MapMetadata) {
         capture_zones,
         tactical_positions,
         minimap,
+        atmosphere: MapAtmosphere::european_valley(),
     };
 
     (world, metadata)

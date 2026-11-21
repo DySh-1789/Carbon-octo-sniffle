@@ -84,24 +84,29 @@ fn setup_scene_lighting_and_camera(
     cam_ctrl.free_look = false;
     cam_ctrl.cursor_locked = false;
 
-    // Warm sunlit European valley sky matching horizon fog
-    commands.insert_resource(ClearColor(Color::srgb(0.62, 0.76, 0.88)));
+    let atmo = sim.0.map.atmosphere;
 
-    // Soft sky/ground ambient bounce light
+    // Biome-tailored sky & ambient light matching the selected map's horizon fog
+    commands.insert_resource(ClearColor(Color::srgb(
+        atmo.sky_rgb[0],
+        atmo.sky_rgb[1],
+        atmo.sky_rgb[2],
+    )));
+
     commands.insert_resource(GlobalAmbientLight {
-        color: Color::srgb(0.84, 0.89, 0.96),
-        brightness: 450.0,
+        color: Color::srgb(atmo.ambient_rgb[0], atmo.ambient_rgb[1], atmo.ambient_rgb[2]),
+        brightness: atmo.ambient_brightness,
         affects_lightmapped_meshes: true,
     });
 
-    // Primary afternoon sun directional light with memory-efficient 2-cascade 1024px shadow maps
+    // Primary sun directional light with memory-efficient 2-cascade 1024px shadow maps
     // (~8 MB vs Bevy's default 64 MB 4-cascade 2048px shadows)
     commands.spawn((
         BattleEntity,
         DirectionalLight {
-            illuminance: 15_500.0,
+            illuminance: atmo.sun_illuminance,
             shadow_maps_enabled: true,
-            color: Color::srgb(1.0, 0.96, 0.88),
+            color: Color::srgb(atmo.sun_rgb[0], atmo.sun_rgb[1], atmo.sun_rgb[2]),
             ..default()
         },
         CascadeShadowConfigBuilder {
@@ -111,7 +116,8 @@ fn setup_scene_lighting_and_camera(
             ..default()
         }
         .build(),
-        Transform::from_xyz(110.0, 155.0, 85.0).looking_at(Vec3::ZERO, Vec3::Y),
+        Transform::from_xyz(atmo.sun_dir[0], atmo.sun_dir[1], atmo.sun_dir[2])
+            .looking_at(Vec3::ZERO, Vec3::Y),
     ));
 
     let spawn_pos = to_bevy_vec3(sim.0.player_tank().position);
@@ -129,12 +135,17 @@ fn setup_scene_lighting_and_camera(
             ..default()
         }),
         DistanceFog {
-            color: Color::srgba(0.66, 0.78, 0.88, 1.0),
-            directional_light_color: Color::srgba(1.0, 0.95, 0.84, 0.35),
+            color: Color::srgba(atmo.fog_rgb[0], atmo.fog_rgb[1], atmo.fog_rgb[2], 1.0),
+            directional_light_color: Color::srgba(
+                atmo.sun_rgb[0],
+                atmo.sun_rgb[1],
+                atmo.sun_rgb[2],
+                0.35,
+            ),
             directional_light_exponent: 24.0,
             falloff: FogFalloff::Linear {
-                start: 125.0,
-                end: 370.0,
+                start: atmo.fog_start,
+                end: atmo.fog_end,
             },
         },
         Transform::from_translation(spawn_pos + Vec3::new(0.0, 5.5, 11.5))

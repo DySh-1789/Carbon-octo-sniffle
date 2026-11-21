@@ -96,6 +96,24 @@ impl SimWorld {
         sim
     }
 
+    /// Reconfigures this simulation for `map_id`, regenerating the `VoxelWorld` and `NavGrid`
+    /// only when switching to a different map, then sets up a tier-matched `per_team` vs `per_team` battle.
+    pub fn configure_battle_on_map(
+        &mut self,
+        map_id: crate::maps::MapId,
+        catalog: &VehicleCatalog,
+        player_vehicle_id: &str,
+        per_team: usize,
+    ) {
+        if self.map.id != map_id.id() {
+            let (voxels, map) = crate::maps::generate_map(map_id);
+            self.nav = Some(NavGrid::build(&voxels));
+            self.voxels = voxels;
+            self.map = map;
+        }
+        self.configure_tier_battle(catalog, player_vehicle_id, per_team);
+    }
+
     /// Reconfigures this simulation in place for a new player vehicle and tier-matched team battle,
     /// reusing the existing `VoxelWorld`, `MapMetadata`, and `NavGrid` with zero world regeneration.
     pub fn configure_tier_battle(

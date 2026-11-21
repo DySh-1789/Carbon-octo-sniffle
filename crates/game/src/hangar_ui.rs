@@ -2,7 +2,7 @@ use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
 use bevy::prelude::*;
 use bevy::render::view::Msaa;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
-use sim::{Nation, VehicleSpec, tier_roman};
+use sim::{MapId, Nation, VehicleSpec, tier_roman};
 use voxel::mesh_voxel_model;
 
 use crate::bridge::{SimResource, to_bevy_vec3};
@@ -46,6 +46,8 @@ enum HangarAction {
     SetViewMode(HangarViewMode),
     SelectNation(Nation),
     SelectTierSlot(u8),
+    PrevMap,
+    NextMap,
 }
 
 /// Visual styling category for an interactive `HangarAction` node.
@@ -66,6 +68,7 @@ struct HangarLayer(HangarViewMode);
 #[derive(Component, Clone, Copy, PartialEq, Eq)]
 enum HangarDynamicText {
     TopVehicleBanner,
+    MapSelectorLabel,
     SpecsTitle,
     SpecsFirepower,
     SpecsProtection,
@@ -507,6 +510,82 @@ fn setup_hangar_ui(
                         },
                         TextColor(Color::srgb(0.95, 0.94, 0.88)),
                     ));
+                });
+
+                // Compact 5-map battlefield selector (< MAP: EUROPEAN VALLEY >)
+                top.spawn(Node {
+                    align_items: AlignItems::Center,
+                    column_gap: Val::Px(6.0),
+                    ..default()
+                })
+                .with_children(|map_row| {
+                    map_row
+                        .spawn((
+                            HangarAction::PrevMap,
+                            HangarButtonStyle::RailTab,
+                            Node {
+                                padding: UiRect::axes(Val::Px(8.0), Val::Px(3.0)),
+                                border: UiRect::all(Val::Px(1.0)),
+                                ..default()
+                            },
+                            BorderColor::all(Color::srgba(0.42, 0.48, 0.56, 0.55)),
+                            BackgroundColor(Color::srgba(0.08, 0.11, 0.15, 0.86)),
+                        ))
+                        .with_children(|b| {
+                            b.spawn((
+                                Text::new("<"),
+                                TextFont {
+                                    font_size: FontSize::Px(11.5),
+                                    ..default()
+                                },
+                                TextColor(Color::WHITE),
+                            ));
+                        });
+
+                    map_row
+                        .spawn((
+                            Node {
+                                padding: UiRect::axes(Val::Px(12.0), Val::Px(3.0)),
+                                border: UiRect::all(Val::Px(1.0)),
+                                ..default()
+                            },
+                            BorderColor::all(Color::srgba(0.45, 0.62, 0.78, 0.45)),
+                            BackgroundColor(Color::srgba(0.05, 0.08, 0.12, 0.82)),
+                        ))
+                        .with_children(|lbl| {
+                            lbl.spawn((
+                                HangarDynamicText::MapSelectorLabel,
+                                Text::new("MAP 1/5: EUROPEAN VALLEY (TEMPERATE VILLAGE)"),
+                                TextFont {
+                                    font_size: FontSize::Px(11.0),
+                                    ..default()
+                                },
+                                TextColor(Color::srgb(0.68, 0.88, 0.98)),
+                            ));
+                        });
+
+                    map_row
+                        .spawn((
+                            HangarAction::NextMap,
+                            HangarButtonStyle::RailTab,
+                            Node {
+                                padding: UiRect::axes(Val::Px(8.0), Val::Px(3.0)),
+                                border: UiRect::all(Val::Px(1.0)),
+                                ..default()
+                            },
+                            BorderColor::all(Color::srgba(0.42, 0.48, 0.56, 0.55)),
+                            BackgroundColor(Color::srgba(0.08, 0.11, 0.15, 0.86)),
+                        ))
+                        .with_children(|b| {
+                            b.spawn((
+                                Text::new(">"),
+                                TextFont {
+                                    font_size: FontSize::Px(11.5),
+                                    ..default()
+                                },
+                                TextColor(Color::WHITE),
+                            ));
+                        });
                 });
             });
 
@@ -1117,7 +1196,7 @@ fn handle_hangar_ui_interaction(
             HangarAction::SetViewMode(m) => selected.view_mode == m,
             HangarAction::SelectNation(n) => selected.nation == n,
             HangarAction::SelectTierSlot(t) => current_tier == t,
-            HangarAction::EnterBattle => false,
+            HangarAction::EnterBattle | HangarAction::PrevMap | HangarAction::NextMap => false,
         };
 
         let (fill, rim) = match style {
@@ -1224,12 +1303,22 @@ fn handle_hangar_ui_interaction(
                     selected.preview_dirty = true;
                 }
             }
+            HangarAction::PrevMap => {
+                selected.map_id = selected.map_id.prev();
+            }
+            HangarAction::NextMap => {
+                selected.map_id = selected.map_id.next();
+            }
         }
     }
 
     if trigger_battle {
-        sim.0
-            .configure_tier_battle(&catalog.0, &selected.vehicle_id, 6);
+        sim.0.configure_battle_on_map(
+            selected.map_id,
+            &catalog.0,
+            &selected.vehicle_id,
+            6,
+        );
         next_state.set(AppState::InBattle);
     }
 }
@@ -1265,6 +1354,20 @@ fn sync_hangar_ui_content(
                     spec.class.label().to_uppercase(),
                 );
                 color.0 = Color::srgb(0.96, 0.94, 0.88);
+            }
+            HangarDynamicText::MapSelectorLabel => {
+                let idx = MapId::ALL
+                    .iter()
+                    .position(|&m| m == selected.map_id)
+                    .unwrap_or(0)
+                    + 1;
+                text.0 = format!(
+                    "MAP {}/{}: {} ({})",
+                    idx,
+                    MapId::ALL.len(),
+                    selected.map_id.name().to_uppercase(),
+                    selected.map_id.biome_tag(),
+                );
             }
             HangarDynamicText::SpecsTitle | HangarDynamicText::TechSpecTitle => {
                 text.0 = format!("{}  {}", tier_roman(spec.tier), spec.name);
