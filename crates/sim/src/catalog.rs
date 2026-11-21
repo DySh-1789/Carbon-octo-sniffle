@@ -121,6 +121,100 @@ impl VehicleSpec {
         voxel::build_vehicle_models(&self.id).unwrap_or_else(|| build_tank_models(&self.blueprint))
     }
 
+    /// Builds the full historical multi-shell loadout (`AP`, `APHE`, `APHEBC`, `APCBC`, `HE`)
+    /// for this vehicle (Stages 7 & 8).
+    pub fn ammo_loadout(&self) -> Vec<ShellSpec> {
+        let base_ap = self.shell.clone();
+        match self.id.as_str() {
+            // --- USA ---
+            "us_m2a4" | "us_m3_stuart" => vec![
+                ShellSpec::bursting_ap("37mm M51B1 APCBC", ShellKind::Apcbc, 37.0, 0.87, 884.0, 79.0, 0.012),
+                base_ap,
+                ShellSpec::he_for_caliber("37mm M63 HE", 37.0, 0.73, 792.0, 0.039),
+            ],
+            "us_m4a1" => vec![
+                ShellSpec::bursting_ap("75mm M61 APCBC", ShellKind::Apcbc, 75.0, 6.79, 618.0, 104.0, 0.065),
+                base_ap,
+                ShellSpec::he_for_caliber("75mm M48 HE", 75.0, 6.62, 580.0, 0.67),
+            ],
+            "us_m10" | "us_m4a3e8" | "us_m4a3e2_76" => vec![
+                ShellSpec::bursting_ap("76mm M62 APCBC", ShellKind::Apcbc, 76.2, 7.00, 792.0, 149.0, 0.064),
+                base_ap,
+                ShellSpec::he_for_caliber("76mm M42A1 HE", 76.2, 5.84, 823.0, 0.39),
+            ],
+            "us_m26" => vec![
+                ShellSpec::bursting_ap("90mm M82 APCBC", ShellKind::Apcbc, 90.0, 10.9, 808.0, 173.0, 0.140),
+                base_ap,
+                ShellSpec::he_for_caliber("90mm M71 HE", 90.0, 10.55, 823.0, 0.97),
+            ],
+            "us_t34" => vec![
+                base_ap,
+                ShellSpec::he_for_caliber("120mm M356 HE", 120.0, 22.9, 762.0, 3.15),
+            ],
+            // --- GERMANY ---
+            "de_pz2c" => vec![
+                base_ap,
+                ShellSpec::he_for_caliber("20mm Sprgr. HE", 20.0, 0.115, 780.0, 0.010),
+            ],
+            "de_pz3j" => vec![
+                ShellSpec::bursting_ap("50mm PzGr 39 APCBC", ShellKind::Apcbc, 50.0, 2.06, 685.0, 84.0, 0.018),
+                ShellSpec::he_for_caliber("50mm Sprgr. 38 HE", 50.0, 1.82, 450.0, 0.17),
+            ],
+            "de_pz4_f2" | "de_stug3g" => vec![
+                ShellSpec::bursting_ap("75mm PzGr 39 APCBC", ShellKind::Apcbc, 75.0, 6.80, 740.0, 137.0, 0.018),
+                ShellSpec::he_for_caliber("75mm Sprgr. 34 HE", 75.0, 5.74, 550.0, 0.68),
+            ],
+            "de_tiger_h1" => vec![
+                ShellSpec::bursting_ap("88mm PzGr 39 APCBC", ShellKind::Apcbc, 88.0, 10.2, 773.0, 165.0, 0.108),
+                ShellSpec::bursting_ap("88mm PzGr. APHE", ShellKind::Aphe, 88.0, 9.5, 810.0, 152.0, 0.215),
+                ShellSpec::he_for_caliber("88mm Sprgr. L/4.5 HE", 88.0, 9.0, 820.0, 0.94),
+            ],
+            "de_panther_a" => vec![
+                ShellSpec::bursting_ap("75mm PzGr 39/42 APCBC", ShellKind::Apcbc, 75.0, 6.80, 935.0, 192.0, 0.018),
+                ShellSpec::he_for_caliber("75mm Sprgr. 42 HE", 75.0, 5.74, 700.0, 0.65),
+            ],
+            "de_tiger2_h" => vec![
+                ShellSpec::bursting_ap("88mm PzGr 39/43 APCBC", ShellKind::Apcbc, 88.0, 10.2, 1000.0, 237.0, 0.108),
+                ShellSpec::he_for_caliber("88mm Sprgr. 43 HE", 88.0, 9.4, 750.0, 1.00),
+            ],
+            "de_jagdtiger" => vec![
+                ShellSpec::bursting_ap("128mm PzGr 43 APCBC", ShellKind::Apcbc, 128.0, 28.3, 930.0, 272.0, 0.78),
+                ShellSpec::he_for_caliber("128mm Sprgr. L/4.5 HE", 128.0, 28.0, 750.0, 3.95),
+            ],
+            // --- USSR ---
+            "su_bt5" | "su_t50" => vec![
+                ShellSpec::bursting_ap("45mm BR-240 APHEBC", ShellKind::Aphebc, 45.0, 1.43, 760.0, 70.0, 0.019),
+                ShellSpec::he_for_caliber("45mm O-240 HE", 45.0, 2.14, 343.0, 0.12),
+            ],
+            "su_t34_41" | "su_kv1_zis5" => vec![
+                ShellSpec::bursting_ap("76mm BR-350B APHEBC", ShellKind::Aphebc, 76.2, 6.50, 655.0, 96.0, 0.150),
+                ShellSpec::bursting_ap("76mm BR-350A APHE", ShellKind::Aphe, 76.2, 6.30, 662.0, 88.0, 0.155),
+                ShellSpec::he_for_caliber("76mm OF-350M HE", 76.2, 6.20, 680.0, 0.62),
+            ],
+            "su_t34_85" => vec![
+                ShellSpec::bursting_ap("85mm BR-365A APHEBC", ShellKind::Aphebc, 85.0, 9.20, 792.0, 138.0, 0.164),
+                ShellSpec::bursting_ap("85mm BR-365K APHE", ShellKind::Aphe, 85.0, 9.20, 792.0, 148.0, 0.048),
+                ShellSpec::he_for_caliber("85mm O-365K HE", 85.0, 9.54, 785.0, 0.74),
+            ],
+            "su_is2" => vec![
+                ShellSpec::bursting_ap("122mm BR-471B APHEBC", ShellKind::Aphebc, 122.0, 25.0, 795.0, 205.0, 0.160),
+                ShellSpec::bursting_ap("122mm BR-471 APHE", ShellKind::Aphe, 122.0, 25.0, 795.0, 198.0, 0.160),
+                ShellSpec::he_for_caliber("122mm OF-471 HE", 122.0, 25.0, 800.0, 3.60),
+            ],
+            "su_t44_100" => vec![
+                ShellSpec::bursting_ap("100mm BR-412D APCBC", ShellKind::Apcbc, 100.0, 15.88, 887.0, 235.0, 0.061),
+                ShellSpec::bursting_ap("100mm BR-412B APHEBC", ShellKind::Aphebc, 100.0, 15.88, 895.0, 218.0, 0.065),
+                ShellSpec::he_for_caliber("100mm OF-412 HE", 100.0, 15.6, 900.0, 1.46),
+            ],
+            "su_is3" => vec![
+                ShellSpec::bursting_ap("122mm BR-471D APCBC", ShellKind::Apcbc, 122.0, 25.0, 800.0, 230.0, 0.160),
+                ShellSpec::bursting_ap("122mm BR-471B APHEBC", ShellKind::Aphebc, 122.0, 25.0, 795.0, 205.0, 0.160),
+                ShellSpec::he_for_caliber("122mm OF-471 HE", 122.0, 25.0, 800.0, 3.60),
+            ],
+            _ => vec![base_ap, ShellSpec::basic_75mm_he()],
+        }
+    }
+
     /// Converts this historical specification + its voxel model mounts into a simulation [`TankConfig`].
     pub fn to_tank_config(&self, models: &TankVoxelModels) -> TankConfig {
         let hp_t = self.power_to_weight();
@@ -129,6 +223,8 @@ impl VehicleSpec {
         let hull_half_w = (self.blueprint.hull_w as f32 * vs * 0.5).clamp(1.15, 1.90);
         let hull_half_l = (self.blueprint.hull_l as f32 * vs * 0.5).clamp(2.10, 3.60);
         let hull_radius = (hull_half_w * hull_half_w + hull_half_l * hull_half_l).sqrt();
+        let ammo_rack = self.ammo_loadout();
+        let primary_shell = ammo_rack[0].clone();
 
         TankConfig {
             vehicle_id: self.id.clone(),
@@ -148,9 +244,10 @@ impl VehicleSpec {
             gun_min_pitch: self.gun_min_deg.to_radians(),
             gun_max_pitch: self.gun_max_deg.to_radians(),
             reload_time: self.reload_time,
-            muzzle_velocity: self.shell.muzzle_velocity,
-            shell_drag: self.shell.drag_coeff,
-            shell: self.shell.clone(),
+            muzzle_velocity: primary_shell.muzzle_velocity,
+            shell_drag: primary_shell.drag_coeff,
+            shell: primary_shell,
+            ammo_rack,
             armor: self.armor.clone(),
             hull_radius,
             hull_half_width: hull_half_w,
@@ -249,6 +346,12 @@ fn ap_shell(name: &str, caliber_mm: f32, mass_kg: f32, vel: f32, pen_0m: f32) ->
         } else {
             7
         },
+        explosive_mass_kg: 0.0,
+        he_pen_mm: 0.0,
+        blast_radius_m: if caliber_mm >= 100.0 { 1.15 } else { 0.85 },
+        blast_power: if caliber_mm >= 100.0 { 3.4 } else { 2.7 },
+        fuse_sensitivity_mm: 0.0,
+        fuse_delay_m: 0.0,
     }
 }
 

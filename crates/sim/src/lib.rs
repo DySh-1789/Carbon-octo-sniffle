@@ -22,7 +22,8 @@ pub use damage::{
     ArmorHit, ArmorProfile, ArmorType, CREW_TRANSFER_TIME, CrewMemberState, CrewRole,
     DamageModifiers, FIRE_BURNOUT_TIME, HitOutcome, HitReport, KillReason, MIN_OPERATIONAL_CREW,
     ModuleHealth, ModuleKind, ModuleState, NO_LOADER_RELOAD_MULT, PartFrame, TankDamageState,
-    raycast_tank_armor, resolve_ap_impact,
+    raycast_tank_armor, resolve_ap_impact, resolve_he_impact, resolve_he_splash,
+    resolve_shell_impact,
 };
 pub use map_gen::{
     CaptureZoneDef, MapAtmosphere, MapMetadata, MinimapData, TacticalPosition,
@@ -170,7 +171,7 @@ mod tests {
                     ..Default::default()
                 },
             );
-            if let Some(ev) = sim.recent_impacts.first().copied() {
+            if let Some(ev) = sim.recent_impacts.first().cloned() {
                 impact = Some(ev);
                 break;
             }
@@ -1092,5 +1093,183 @@ mod tests {
             sim.step_fixed(FIXED_DT, TankInput::default());
         }
         assert!(sim.tanks.iter().all(|t| t.state.position.is_finite()));
+    }
+
+    #[test]
+    fn stage7_he_carves_brick_wall_and_terrain_crater_while_preserving_bedrock() {
+        let mut world = generate_flat_proving_ground(64);
+        world.bounds_max.y = 12;
+        // Build a 3 m tall brick house wall at z = -12 m (vz = -24)
+        world.fill_box(
+            IVec3::new(-10, 0, -25),
+            IVec3::new(10, 5, -24),
+            VoxelId::BRICK,
+        );
+        let _ = world.take_dirty_chunks(1024);
+
+        // Detonate 122mm HE directly into the brick wall
+        let he_122 = ShellSpec::he_for_caliber("122mm OF-471 HE", 122.0, 25.0, 800.0, 3.60);
+        let res = world.carve_explosion(
+            Vec3::new(0.0, 1.0, -12.0),
+            he_122.blast_radius_m,
+            he_122.blast_power,
+        );
+        assert!(
+            res.destroyed_voxels >= 20,
+            "122mm HE must breach brick wall and carve crater, destroyed={}",
+            res.destroyed_voxels
+        );
+        assert!(!res.debris.is_empty());
+        assert!(world.dirty_chunk_count() > 0, "carved chunks must be marked dirty");
+        // Verify wall center was blown open while bottom bedrock layer stays 100% intact!
+        assert_eq!(world.get_voxel(IVec3::new(0, 2, -24)), VoxelId::AIR);
+        assert!(
+            world.is_solid(IVec3::new(0, world.bounds_min.y, -24)),
+            "bedrock layer bounds_min.y must never be carved out"
+        );
+    }
+
+    #[test]
+    fn stage7_he_overpressures_open_top_m10_and_blasts_heavy_tracks_without_overpressuring_is3() {
+        let catalog = VehicleCatalog::stage5_catalog();
+        let m10 = catalog.by_id("us_m10").unwrap();
+        let is3 = catalog.by_id("su_is3").unwrap();
+        let he_75 = ShellSpec::basic_75mm_he(); // 16mm HE pen
+
+        // 1. 75mm HE (16mm pen) hitting M10 Wolverine turret (open-top 10mm roof) triggers Overpressure!
+        let m10_cfg = m10.to_tank_config(&m10.build_models());
+        let m10_tank = TankState::new(m10_cfg, Vec3::ZERO, 0.0);
+        let mut m10_dmg = TankDamageState::from_profile(&m10.armor);
+        let dir = Vec3::new(0.0, 0.0, 1.0);
+        let hit_m10 = raycast_tank_armor(&m10_tank, Vec3::new(0.0, 1.85, -10.0), dir, 20.0, false, true)
+            .expect("ray should hit M10 turret");
+        let mut rng = SimRng::new(55);
+        let rep_m10 = resolve_shell_impact(
+            TankId(0),
+            Team::Axis,
+            TankId(1),
+            "M10",
+            Team::Allies,
+            true,
+            &m10_tank,
+            &mut m10_dmg,
+            &he_75,
+            hit_m10,
+            dir,
+            he_75.muzzle_velocity,
+            &mut rng,
+        );
+        assert!(rep_m10.overpressure, "75mm HE must overpressure thin-roof/open-top M10");
+        assert_eq!(rep_m10.kill_reason, Some(KillReason::Overpressure));
+
+        // 2. Same 75mm HE (16mm pen) hitting IS-3 heavy UFP (110mm, 20mm+ roof) cannot overpressure IS-3!
+        let is3_cfg = is3.to_tank_config(&is3.build_models());
+        let is3_tank = TankState::new(is3_cfg, Vec3::ZERO, 0.0);
+        let mut is3_dmg = TankDamageState::from_profile(&is3.armor);
+        let hit_is3 = raycast_tank_armor(&is3_tank, Vec3::new(0.0, 1.0, -10.0), dir, 20.0, false, true)
+            .expect("ray should hit IS-3 hull");
+        let rep_is3 = resolve_shell_impact(
+            TankId(0),
+            Team::Axis,
+            TankId(1),
+            "IS-3",
+            Team::Allies,
+            true,
+            &is3_tank,
+            &mut is3_dmg,
+            &he_75,
+            hit_is3,
+            dir,
+            he_75.muzzle_velocity,
+            &mut rng,
+        );
+        assert!(!rep_is3.overpressure, "75mm HE must NOT overpressure heavily armored IS-3");
+        assert!(rep_is3.kill_reason.is_none());
+    }
+
+    #[test]
+    fn stage8_bursting_charge_shells_aphe_aphebc_apcbc_detonate_internally_and_switch_slots() {
+        let catalog = VehicleCatalog::stage5_catalog();
+
+        // 1. Verify all 5 shell families exist across the 24-vehicle catalog
+        let mut kinds = std::collections::HashSet::new();
+        for spec in catalog.all() {
+            let rack = spec.ammo_loadout();
+            assert!(rack.len() >= 2, "{} must carry at least 2 shell types", spec.id);
+            assert!(
+                rack.iter().any(|s| s.kind == ShellKind::He),
+                "{} must carry HE shell",
+                spec.id
+            );
+            for sh in &rack {
+                kinds.insert(sh.kind);
+            }
+        }
+        assert!(kinds.contains(&ShellKind::Ap));
+        assert!(kinds.contains(&ShellKind::He));
+        assert!(kinds.contains(&ShellKind::Aphe));
+        assert!(kinds.contains(&ShellKind::Aphebc));
+        assert!(kinds.contains(&ShellKind::Apcbc));
+
+        // 2. Verify Soviet APHEBC superior slope normalization & German APCBC lower drag than plain AP
+        let t34_85 = catalog.by_id("su_t34_85").unwrap();
+        let aphebc = &t34_85.ammo_loadout()[0];
+        let panther = catalog.by_id("de_panther_a").unwrap();
+        let apcbc = &panther.ammo_loadout()[0];
+        let plain_ap = ShellSpec::basic_75mm_ap();
+        assert_eq!(aphebc.kind, ShellKind::Aphebc);
+        assert_eq!(apcbc.kind, ShellKind::Apcbc);
+        assert!(aphebc.normalization_deg > plain_ap.normalization_deg);
+        assert!(apcbc.drag_coeff < plain_ap.drag_coeff);
+
+        // 3. Penetrating 85mm BR-365A APHEBC into broadside medium tank arms fuse & detonates 360° inside!
+        let models = build_basic_tank_models();
+        let cfg = TankConfig::stage1_basic(&models);
+        let side_tank = TankState::new(cfg.clone(), Vec3::ZERO, std::f32::consts::FRAC_PI_2);
+        let mut dmg = TankDamageState::basic_medium_tank();
+        let dir = Vec3::new(0.0, 0.0, -1.0);
+        let hit = raycast_tank_armor(&side_tank, Vec3::new(0.0, 1.05, 8.0), dir, 20.0, false, true)
+            .expect("ray should hit side hull");
+        let mut rng = SimRng::new(77);
+        let rep = resolve_shell_impact(
+            TankId(0),
+            Team::Allies,
+            TankId(1),
+            "Target",
+            Team::Axis,
+            true,
+            &side_tank,
+            &mut dmg,
+            aphebc,
+            hit,
+            dir,
+            aphebc.muzzle_velocity,
+            &mut rng,
+        );
+        assert_eq!(rep.outcome, HitOutcome::Penetration);
+        assert!(rep.aphe_detonated, "85mm APHEBC penetrating 42mm side must detonate bursting charge");
+        assert!(!rep.over_penetrated);
+        assert!(
+            rep.killed_crew.len() >= 2 || rep.kill_reason.is_some(),
+            "360° APHEBC internal burst should heavily devastate crew/modules"
+        );
+
+        // 4. Verify live multi-shell slot switching (`select_shell`) chambers HE cleanly
+        let voxels = generate_flat_proving_ground(96);
+        let mut sim = SimWorld::new(voxels, cfg);
+        assert_eq!(sim.player_tank().active_shell().kind, ShellKind::Ap);
+        sim.step_fixed(
+            FIXED_DT,
+            TankInput {
+                select_shell: Some(1),
+                ..Default::default()
+            },
+        );
+        assert_eq!(sim.player_tank().selected_shell_idx, 1);
+        for _ in 0..240 {
+            sim.step_fixed(FIXED_DT, TankInput::default());
+        }
+        assert!(sim.player_tank().is_loaded());
+        assert_eq!(sim.player_tank().active_shell().kind, ShellKind::He);
     }
 }

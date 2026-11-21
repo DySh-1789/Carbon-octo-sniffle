@@ -1411,11 +1411,14 @@ fn sync_hangar_ui_content(
             }
             HangarDynamicText::CarouselSub(tier) => {
                 if let Some(v) = catalog.0.by_nation_and_tier(selected.nation, tier) {
+                    let loadout = v.ammo_loadout();
+                    let primary = loadout.first().unwrap_or(&v.shell);
                     text.0 = format!(
-                        "{} | {:.0}mm AP ({:.0}mm)",
+                        "{} | {:.0}mm {} ({:.0}mm)",
                         v.class.short_label(),
-                        v.shell.caliber_mm,
-                        v.shell.penetration_0m_mm,
+                        primary.caliber_mm,
+                        primary.kind.short_label(),
+                        primary.penetration_0m_mm,
                     );
                 }
             }
@@ -1438,10 +1441,13 @@ fn sync_hangar_ui_content(
                     } else {
                         v.class.label()
                     };
+                    let loadout = v.ammo_loadout();
+                    let primary = loadout.first().unwrap_or(&v.shell);
                     text.0 = format!(
-                        "Gun: {}\nPen: {:.0}mm AP | Reload {:.1}s\nUFP: {:.0}mm @{:.0} deg | {}",
+                        "Gun: {}\nPen: {:.0}mm {} | Reload {:.1}s\nUFP: {:.0}mm @{:.0} deg | {}",
                         v.gun_name,
-                        v.shell.penetration_0m_mm,
+                        primary.penetration_0m_mm,
+                        primary.kind.short_label(),
                         v.reload_time,
                         v.armor.ufp_mm,
                         v.armor.ufp_slope_deg,
@@ -1454,24 +1460,58 @@ fn sync_hangar_ui_content(
 }
 
 fn format_firepower(spec: &VehicleSpec) -> String {
+    let loadout = spec.ammo_loadout();
+    let primary = loadout.first().unwrap_or(&spec.shell);
     // Approximate 500m penetration using De Marre velocity decay
-    let tof_500 = 500.0 / spec.shell.muzzle_velocity.max(1.0);
-    let v_500 = spec.shell.muzzle_velocity * (-spec.shell.drag_coeff * tof_500).exp();
-    let pen_500 = spec.shell.penetration_at_speed(v_500);
+    let tof_500 = 500.0 / primary.muzzle_velocity.max(1.0);
+    let v_500 = primary.muzzle_velocity * (-primary.drag_coeff * tof_500).exp();
+    let pen_500 = primary.penetration_at_speed(v_500);
     let arc = match spec.turret_yaw_limit_deg {
         Some(lim) => format!("+-{:.0} deg Casemate", lim),
         None => format!("360 deg ({:.0} deg/s)", spec.turret_turn_deg_s),
     };
+    let ammo_lines: Vec<String> = loadout
+        .iter()
+        .enumerate()
+        .map(|(i, sh)| {
+            if sh.is_he() {
+                format!(
+                    "[{}] {} ({:.0}mm HE | {:.2}kg TNT)",
+                    i + 1,
+                    sh.name,
+                    sh.he_pen_mm,
+                    sh.explosive_mass_kg
+                )
+            } else if sh.has_bursting_charge() {
+                format!(
+                    "[{}] {} ({} {:.0}mm | {:.0}g TNT)",
+                    i + 1,
+                    sh.name,
+                    sh.kind.short_label(),
+                    sh.penetration_0m_mm,
+                    sh.explosive_mass_kg * 1000.0
+                )
+            } else {
+                format!(
+                    "[{}] {} ({} {:.0}mm)",
+                    i + 1,
+                    sh.name,
+                    sh.kind.short_label(),
+                    sh.penetration_0m_mm
+                )
+            }
+        })
+        .collect();
     format!(
-        "Gun: {}\nShell: {}\nPen: {:.0}mm (0m) / {:.0}mm (500m)\nReload: {:.1}s | Dep/Elv: {:+.0}/{:+.0} deg\nTraverse: {}",
+        "Gun: {}\nPen: {:.0}mm (0m) / {:.0}mm (500m)\nReload: {:.1}s | Dep/Elv: {:+.0}/{:+.0} deg\nTraverse: {}\nAmmo:\n{}",
         spec.gun_name,
-        spec.shell.name,
-        spec.shell.penetration_0m_mm,
+        primary.penetration_0m_mm,
         pen_500,
         spec.reload_time,
         spec.gun_min_deg,
         spec.gun_max_deg,
         arc,
+        ammo_lines.join("\n"),
     )
 }
 

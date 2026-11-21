@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use bevy::prelude::*;
 use sim::{HitOutcome, KillReason};
+use voxel::VoxelId;
 
 use crate::bridge::{PendingSimEvents, SimResource, to_bevy_vec3};
 use crate::camera::MainTankCamera;
@@ -21,6 +22,9 @@ struct EffectsAssets {
     smoke_mat: Handle<StandardMaterial>,
     wreck_smoke_mat: Handle<StandardMaterial>,
     dirt_mat: Handle<StandardMaterial>,
+    brick_debris_mat: Handle<StandardMaterial>,
+    rubble_debris_mat: Handle<StandardMaterial>,
+    wood_debris_mat: Handle<StandardMaterial>,
 }
 
 #[derive(Resource, Default)]
@@ -138,6 +142,21 @@ fn setup_effects_assets(
         perceptual_roughness: 0.95,
         ..default()
     });
+    let brick_debris_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.66, 0.28, 0.20),
+        perceptual_roughness: 0.90,
+        ..default()
+    });
+    let rubble_debris_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.56, 0.54, 0.50),
+        perceptual_roughness: 0.94,
+        ..default()
+    });
+    let wood_debris_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.46, 0.30, 0.16),
+        perceptual_roughness: 0.90,
+        ..default()
+    });
 
     commands.insert_resource(EffectsAssets {
         tracer_mesh,
@@ -149,6 +168,9 @@ fn setup_effects_assets(
         smoke_mat,
         wreck_smoke_mat,
         dirt_mat,
+        brick_debris_mat,
+        rubble_debris_mat,
+        wood_debris_mat,
     });
 }
 
@@ -283,7 +305,7 @@ fn spawn_shot_and_impact_effects(
         }
     }
 
-    // 2. Impact voxel dust / flash burst when shell strikes terrain or buildings
+    // 2. Impact voxel dust / flash burst + Stage 7 HE craters & flying voxel debris
     for impact in &pending.impacts {
         let pos = to_bevy_vec3(impact.position);
         let normal = to_bevy_vec3(impact.normal).normalize_or_zero();
@@ -292,65 +314,134 @@ fn spawn_shot_and_impact_effects(
         } else {
             Vec3::Y
         };
+        let blast_scale = if impact.is_he {
+            (impact.blast_radius_m * 0.65).clamp(1.25, 3.2)
+        } else {
+            1.0 + (impact.destroyed_voxels as f32 * 0.04).min(0.6)
+        };
 
         if near_cam(pos) {
+            let intensity = if impact.is_he {
+                560_000.0 * blast_scale
+            } else {
+                280_000.0
+            };
             commands.spawn((
                 PointLight {
-                    color: Color::srgb(1.0, 0.6, 0.2),
-                    intensity: 280_000.0,
-                    range: 14.0,
+                    color: if impact.is_he {
+                        Color::srgb(1.0, 0.50, 0.12)
+                    } else {
+                        Color::srgb(1.0, 0.6, 0.2)
+                    },
+                    intensity,
+                    range: 14.0 * blast_scale,
                     ..default()
                 },
                 Transform::from_translation(pos + up * 0.6),
                 TransientLight {
                     age: 0.0,
-                    lifetime: 0.16,
-                    start_intensity: 280_000.0,
+                    lifetime: if impact.is_he { 0.34 } else { 0.16 },
+                    start_intensity: intensity,
                 },
             ));
         }
 
+        // Core blast flash (massive fireball for HE shells)
         commands.spawn((
             Mesh3d(assets.puff_mesh.clone()),
-            MeshMaterial3d(assets.flash_mat.clone()),
-            Transform::from_translation(pos + up * 0.35).with_scale(Vec3::splat(0.9)),
+            MeshMaterial3d(if impact.is_he {
+                assets.fire_mat.clone()
+            } else {
+                assets.flash_mat.clone()
+            }),
+            Transform::from_translation(pos + up * (0.35 * blast_scale))
+                .with_scale(Vec3::splat(0.9 * blast_scale)),
             TransientParticle {
-                velocity: up * 2.0,
+                velocity: up * (2.2 * blast_scale),
                 gravity: 0.0,
                 age: 0.0,
-                lifetime: 0.18,
-                start_scale: 0.95,
-                end_scale: 0.05,
+                lifetime: if impact.is_he { 0.36 } else { 0.18 },
+                start_scale: 0.95 * blast_scale,
+                end_scale: if impact.is_he { 0.25 } else { 0.05 },
             },
         ));
 
-        for i in 0..8 {
-            let angle = i as f32 * std::f32::consts::TAU / 8.0;
-            let spread = 2.4 + (i % 3) as f32 * 1.4;
-            let vel = up * (4.2 + (i % 4) as f32 * 1.8)
-                + Vec3::new(angle.cos() * spread, 1.5, angle.sin() * spread);
+        let puff_count = if impact.is_he { 12 } else { 8 };
+        for i in 0..puff_count {
+            let angle = i as f32 * std::f32::consts::TAU / puff_count as f32;
+            let spread = (2.4 + (i % 3) as f32 * 1.4) * blast_scale;
+            let vel = up * ((4.2 + (i % 4) as f32 * 1.8) * blast_scale.sqrt())
+                + Vec3::new(angle.cos() * spread, 1.5 * blast_scale, angle.sin() * spread);
             let is_smoke = i % 2 == 0;
             commands.spawn((
                 Mesh3d(assets.puff_mesh.clone()),
                 MeshMaterial3d(if is_smoke {
-                    assets.smoke_mat.clone()
+                    if impact.is_he && i % 4 == 0 {
+                        assets.wreck_smoke_mat.clone()
+                    } else {
+                        assets.smoke_mat.clone()
+                    }
                 } else {
                     assets.dirt_mat.clone()
                 }),
-                Transform::from_translation(pos + up * 0.3).with_scale(Vec3::splat(0.35)),
+                Transform::from_translation(pos + up * 0.3).with_scale(Vec3::splat(0.35 * blast_scale)),
                 TransientParticle {
                     velocity: vel,
-                    gravity: if is_smoke { 2.5 } else { 14.0 },
+                    gravity: if is_smoke { 1.8 } else { 14.0 },
                     age: 0.0,
-                    lifetime: if is_smoke { 0.85 } else { 0.65 },
-                    start_scale: if is_smoke { 0.45 } else { 0.32 },
-                    end_scale: if is_smoke { 1.6 } else { 0.08 },
+                    lifetime: if is_smoke {
+                        0.85 + if impact.is_he { 0.55 } else { 0.0 }
+                    } else {
+                        0.65
+                    },
+                    start_scale: (if is_smoke { 0.45 } else { 0.32 }) * blast_scale.sqrt(),
+                    end_scale: (if is_smoke { 1.6 } else { 0.08 }) * blast_scale,
+                },
+            ));
+        }
+
+        // Flying physical voxel debris from destroyed houses, walls, roofs & terrain craters
+        for (idx, &(debris_pos, voxel_id)) in impact.debris.iter().enumerate() {
+            let dpos = to_bevy_vec3(debris_pos);
+            let radial = (dpos - pos).normalize_or_zero();
+            let angle = idx as f32 * 2.399_963;
+            let burst_dir = if radial.length_squared() > 0.05 {
+                radial
+            } else {
+                Vec3::new(angle.cos(), 0.4, angle.sin()).normalize()
+            };
+            let mat = match voxel_id {
+                VoxelId::BRICK | VoxelId::ROOF_TILE | VoxelId::MUDBRICK => {
+                    assets.brick_debris_mat.clone()
+                }
+                VoxelId::WOOD | VoxelId::TREE_TRUNK => assets.wood_debris_mat.clone(),
+                VoxelId::PLASTER_WALL
+                | VoxelId::RUBBLE
+                | VoxelId::ROCK
+                | VoxelId::GRANITE
+                | VoxelId::CONCRETE
+                | VoxelId::BUNKER_CONCRETE
+                | VoxelId::SANDSTONE => assets.rubble_debris_mat.clone(),
+                _ => assets.dirt_mat.clone(),
+            };
+            let speed = (4.8 + (idx % 4) as f32 * 2.2) * blast_scale.sqrt();
+            commands.spawn((
+                Mesh3d(assets.puff_mesh.clone()),
+                MeshMaterial3d(mat),
+                Transform::from_translation(dpos).with_scale(Vec3::splat(0.34)),
+                TransientParticle {
+                    velocity: burst_dir * speed + Vec3::Y * (4.2 + (idx % 3) as f32 * 2.1),
+                    gravity: 16.0,
+                    age: 0.0,
+                    lifetime: 0.72 + (idx % 3) as f32 * 0.16,
+                    start_scale: 0.36,
+                    end_scale: 0.12,
                 },
             ));
         }
     }
 
-    // 3. Stage 4 War Thunder armor hits: ricochet sparks, non-pens, penetrations & ammo detonations
+    // 3. Stage 4/7/8 War Thunder armor hits: ricochet sparks, non-pens, penetrations, HE overpressure & APHE bursts
     for report in &pending.hit_reports {
         let pos = to_bevy_vec3(report.position);
         let normal = to_bevy_vec3(report.normal).normalize_or_zero();
@@ -360,13 +451,14 @@ fn spawn_shot_and_impact_effects(
             Vec3::Y
         };
         let is_ammo_det = report.kill_reason == Some(KillReason::AmmoRackDetonation);
+        let is_explosive_burst = report.aphe_detonated || report.overpressure;
         let destroyed = report.kill_reason.is_some();
 
         if near_cam(pos) {
             let (intensity, range, life) = if is_ammo_det {
                 (900_000.0, 28.0, 0.55)
-            } else if destroyed {
-                (550_000.0, 20.0, 0.38)
+            } else if destroyed || is_explosive_burst {
+                (620_000.0, 22.0, 0.38)
             } else if report.outcome == HitOutcome::Ricochet {
                 (340_000.0, 14.0, 0.14)
             } else {
@@ -420,9 +512,11 @@ fn spawn_shot_and_impact_effects(
             continue;
         }
 
-        // Armor flash & sparks
+        // Armor flash & sparks (amplified for APHE internal detonation & HE overpressure)
         let flash_scale = if is_ammo_det {
             2.4
+        } else if is_explosive_burst {
+            1.75
         } else if destroyed {
             1.4
         } else if report.outcome == HitOutcome::Penetration {
@@ -432,23 +526,35 @@ fn spawn_shot_and_impact_effects(
         };
         commands.spawn((
             Mesh3d(assets.puff_mesh.clone()),
-            MeshMaterial3d(if is_ammo_det {
+            MeshMaterial3d(if is_ammo_det || is_explosive_burst {
                 assets.fire_mat.clone()
             } else {
                 assets.flash_mat.clone()
             }),
             Transform::from_translation(pos + up * 0.25).with_scale(Vec3::splat(flash_scale)),
             TransientParticle {
-                velocity: Vec3::Y * if is_ammo_det { 4.2 } else { 1.0 },
+                velocity: Vec3::Y * if is_ammo_det || is_explosive_burst { 3.6 } else { 1.0 },
                 gravity: 0.0,
                 age: 0.0,
-                lifetime: if is_ammo_det { 0.48 } else { 0.16 },
+                lifetime: if is_ammo_det {
+                    0.48
+                } else if is_explosive_burst {
+                    0.30
+                } else {
+                    0.16
+                },
                 start_scale: flash_scale,
                 end_scale: 0.1,
             },
         ));
 
-        let spark_count = if is_ammo_det { 10 } else { 5 };
+        let spark_count = if is_ammo_det {
+            10
+        } else if is_explosive_burst {
+            8
+        } else {
+            5
+        };
         for i in 0..spark_count {
             let angle = i as f32 * std::f32::consts::TAU / spark_count as f32;
             let vel = up * (5.5 + (i % 3) as f32 * 2.8)
@@ -468,13 +574,19 @@ fn spawn_shot_and_impact_effects(
             ));
         }
 
-        // Massive fireball + dark smoke tower on ammo-rack detonation or knockout
-        if destroyed {
-            let plume_n = if is_ammo_det { 14 } else { 9 };
+        // Massive fireball + dark smoke tower on ammo-rack detonation, overpressure, or knockout
+        if destroyed || is_explosive_burst {
+            let plume_n = if is_ammo_det {
+                14
+            } else if destroyed {
+                9
+            } else {
+                6
+            };
             for i in 0..plume_n {
                 let angle = i as f32 * std::f32::consts::TAU / plume_n as f32;
                 let spread = 1.2 + (i % 3) as f32 * 0.7;
-                let is_flame = is_ammo_det && i % 3 == 0;
+                let is_flame = (is_ammo_det || is_explosive_burst) && i % 3 == 0;
                 commands.spawn((
                     Mesh3d(assets.puff_mesh.clone()),
                     MeshMaterial3d(if is_flame {
@@ -492,12 +604,12 @@ fn spawn_shot_and_impact_effects(
                         gravity: -0.7,
                         age: 0.0,
                         lifetime: if is_flame {
-                            0.75
+                            0.65
                         } else {
-                            1.8 + (i % 5) as f32 * 0.35
+                            1.5 + (i % 5) as f32 * 0.30
                         },
-                        start_scale: 0.60,
-                        end_scale: if is_flame { 2.2 } else { 3.0 },
+                        start_scale: 0.55,
+                        end_scale: if is_flame { 2.0 } else { 2.8 },
                     },
                 ));
             }

@@ -40,7 +40,10 @@ const HUD_MODULES: [ModuleKind; 9] = [
 struct TelemetryStripText;
 
 #[derive(Component)]
-struct AmmoSlotLabelText;
+struct AmmoSlotCard(usize);
+
+#[derive(Component)]
+struct AmmoSlotText(usize);
 
 #[derive(Component)]
 struct AmmoSlotStatusText;
@@ -339,7 +342,7 @@ fn setup_crosshair_and_telemetry(mut commands: Commands, sim: Res<SimResource>) 
                     TextColor(Color::srgb(0.95, 0.84, 0.42)),
                 ));
                 panel.spawn((
-                    Text::new("WASD: Drive | LMB/Space: Fire | Shift: Optic | C: FreeLook"),
+                    Text::new("WASD: Drive | LMB/Space: Fire | 1-3: Ammo | Shift: Optic | C: FreeLook"),
                     TextFont {
                         font_size: FontSize::Px(10.5),
                         ..default()
@@ -522,7 +525,7 @@ fn setup_crosshair_and_telemetry(mut commands: Commands, sim: Res<SimResource>) 
                 });
         });
 
-    // 6. Bottom-Center War Thunder Ammo Action Bar (AP shell slot + integrated reload gauge)
+    // 6. Bottom-Center War Thunder Multi-Slot Ammo Action Bar ([1] / [2] / [3] + reload gauge)
     commands
         .spawn((
             BattleEntity,
@@ -538,38 +541,108 @@ fn setup_crosshair_and_telemetry(mut commands: Commands, sim: Res<SimResource>) 
             center
                 .spawn((
                     Node {
-                        width: Val::Px(240.0),
-                        padding: UiRect::all(Val::Px(7.0)),
+                        padding: UiRect::all(Val::Px(6.0)),
                         flex_direction: FlexDirection::Column,
-                        row_gap: Val::Px(4.0),
-                        border: UiRect::all(Val::Px(1.5)),
+                        row_gap: Val::Px(5.0),
+                        border: UiRect::all(Val::Px(1.0)),
                         ..default()
                     },
-                    BorderColor::all(Color::srgb(0.86, 0.74, 0.36)),
+                    BorderColor::all(Color::srgba(0.50, 0.56, 0.52, 0.45)),
                     BackgroundColor(Color::srgba(0.05, 0.07, 0.08, 0.84)),
                 ))
-                .with_children(|slot| {
-                    slot.spawn((
-                        Node {
-                            width: Val::Percent(100.0),
-                            justify_content: JustifyContent::SpaceBetween,
-                            ..default()
-                        },
-                    ))
-                    .with_children(|top_row| {
-                        top_row.spawn((
-                            AmmoSlotLabelText,
-                            Text::new(format!(
-                                "[1] {} ({:.0}mm)",
-                                player_cfg.shell.name, player_cfg.shell.penetration_0m_mm
-                            )),
-                            TextFont {
-                                font_size: FontSize::Px(11.5),
-                                ..default()
-                            },
-                            TextColor(Color::srgb(0.96, 0.94, 0.86)),
-                        ));
-                        top_row.spawn((
+                .with_children(|bar| {
+                    // Horizontal row of up to 3 selectable shell slots
+                    bar.spawn(Node {
+                        column_gap: Val::Px(6.0),
+                        align_items: AlignItems::Stretch,
+                        ..default()
+                    })
+                    .with_children(|row| {
+                        for slot_idx in 0..3usize {
+                            let shell_opt = player_cfg.ammo_rack.get(slot_idx);
+                            let label = if let Some(sh) = shell_opt {
+                                format!(
+                                    "[{}] {}\n{} | {:.0}mm",
+                                    slot_idx + 1,
+                                    sh.kind.short_label(),
+                                    sh.name,
+                                    if sh.is_he() {
+                                        sh.he_pen_mm
+                                    } else {
+                                        sh.penetration_0m_mm
+                                    }
+                                )
+                            } else {
+                                String::new()
+                            };
+                            row.spawn((
+                                AmmoSlotCard(slot_idx),
+                                Node {
+                                    min_width: Val::Px(118.0),
+                                    padding: UiRect::axes(Val::Px(7.0), Val::Px(4.0)),
+                                    border: UiRect::all(Val::Px(1.5)),
+                                    display: if shell_opt.is_some() {
+                                        Display::Flex
+                                    } else {
+                                        Display::None
+                                    },
+                                    ..default()
+                                },
+                                BorderColor::all(if slot_idx == 0 {
+                                    Color::srgb(0.95, 0.78, 0.30)
+                                } else {
+                                    Color::srgba(0.42, 0.48, 0.46, 0.65)
+                                }),
+                                BackgroundColor(if slot_idx == 0 {
+                                    Color::srgba(0.18, 0.16, 0.08, 0.92)
+                                } else {
+                                    Color::srgba(0.08, 0.10, 0.11, 0.88)
+                                }),
+                            ))
+                            .with_children(|card| {
+                                card.spawn((
+                                    AmmoSlotText(slot_idx),
+                                    Text::new(label),
+                                    TextFont {
+                                        font_size: FontSize::Px(10.5),
+                                        ..default()
+                                    },
+                                    TextColor(Color::srgb(0.96, 0.94, 0.86)),
+                                ));
+                            });
+                        }
+                    });
+
+                    // Shared reload bar + READY / RELOAD status row
+                    bar.spawn(Node {
+                        width: Val::Percent(100.0),
+                        align_items: AlignItems::Center,
+                        column_gap: Val::Px(8.0),
+                        ..default()
+                    })
+                    .with_children(|status_row| {
+                        status_row
+                            .spawn((
+                                Node {
+                                    flex_grow: 1.0,
+                                    height: Val::Px(6.0),
+                                    ..default()
+                                },
+                                BackgroundColor(Color::srgba(0.20, 0.22, 0.22, 0.92)),
+                            ))
+                            .with_children(|bar_bg| {
+                                bar_bg.spawn((
+                                    ReloadFillBar,
+                                    Node {
+                                        width: Val::Percent(100.0),
+                                        height: Val::Percent(100.0),
+                                        ..default()
+                                    },
+                                    BackgroundColor(Color::srgb(0.28, 0.88, 0.36)),
+                                ));
+                            });
+
+                        status_row.spawn((
                             AmmoSlotStatusText,
                             Text::new("READY"),
                             TextFont {
@@ -577,26 +650,6 @@ fn setup_crosshair_and_telemetry(mut commands: Commands, sim: Res<SimResource>) 
                                 ..default()
                             },
                             TextColor(Color::srgb(0.32, 0.94, 0.42)),
-                        ));
-                    });
-
-                    slot.spawn((
-                        Node {
-                            width: Val::Percent(100.0),
-                            height: Val::Px(6.0),
-                            ..default()
-                        },
-                        BackgroundColor(Color::srgba(0.20, 0.22, 0.22, 0.92)),
-                    ))
-                    .with_children(|bar_bg| {
-                        bar_bg.spawn((
-                            ReloadFillBar,
-                            Node {
-                                width: Val::Percent(100.0),
-                                height: Val::Percent(100.0),
-                                ..default()
-                            },
-                            BackgroundColor(Color::srgb(0.28, 0.88, 0.36)),
                         ));
                     });
                 });
@@ -1125,10 +1178,13 @@ fn update_hud_telemetry(
     mut texts: ParamSet<(
         Query<&mut Text, With<TelemetryStripText>>,
         Query<(&mut Text, &mut TextColor), With<CursorHintText>>,
-        Query<&mut Text, With<AmmoSlotLabelText>>,
+        Query<(&AmmoSlotText, &mut Text, &mut TextColor)>,
         Query<(&mut Text, &mut TextColor), With<AmmoSlotStatusText>>,
     )>,
-    mut reload_bar_q: Query<(&mut Node, &mut BackgroundColor), With<ReloadFillBar>>,
+    mut boxes: ParamSet<(
+        Query<(&mut Node, &mut BackgroundColor), With<ReloadFillBar>>,
+        Query<(&AmmoSlotCard, &mut Node, &mut BorderColor, &mut BackgroundColor)>,
+    )>,
 ) {
     let player = sim.0.player_unit();
     let tank = &player.state;
@@ -1173,9 +1229,64 @@ fn update_hud_telemetry(
         }
     }
 
-    if let Ok(mut label) = texts.p2().single_mut() {
-        let sh = &tank.config.shell;
-        label.0 = format!("[1] {} ({:.0}mm)", sh.name, sh.penetration_0m_mm);
+    let rack = &tank.config.ammo_rack;
+    for (slot, mut text, mut color) in &mut texts.p2() {
+        if let Some(sh) = rack.get(slot.0) {
+            let pen_val = if sh.is_he() {
+                sh.he_pen_mm
+            } else {
+                sh.penetration_0m_mm
+            };
+            let loaded_mark = if tank.loaded_shell_idx == slot.0 && tank.is_loaded() {
+                " *"
+            } else if tank.selected_shell_idx == slot.0 && !tank.is_loaded() {
+                " >"
+            } else {
+                ""
+            };
+            text.0 = format!(
+                "[{}] {}{}\n{} | {:.0}mm",
+                slot.0 + 1,
+                sh.kind.short_label(),
+                loaded_mark,
+                sh.name,
+                pen_val,
+            );
+            color.0 = if tank.selected_shell_idx == slot.0 {
+                if sh.is_he() {
+                    Color::srgb(1.0, 0.78, 0.42)
+                } else {
+                    Color::srgb(1.0, 0.96, 0.78)
+                }
+            } else {
+                Color::srgb(0.74, 0.78, 0.76)
+            };
+        }
+    }
+
+    for (card, mut node, mut border, mut bg) in &mut boxes.p1() {
+        if let Some(sh) = rack.get(card.0) {
+            node.display = Display::Flex;
+            let selected = tank.selected_shell_idx == card.0;
+            let loaded = tank.loaded_shell_idx == card.0 && tank.is_loaded();
+            if selected {
+                *border = BorderColor::all(if sh.is_he() {
+                    Color::srgb(1.0, 0.56, 0.22)
+                } else {
+                    Color::srgb(0.96, 0.80, 0.30)
+                });
+                bg.0 = if loaded {
+                    Color::srgba(0.20, 0.18, 0.08, 0.94)
+                } else {
+                    Color::srgba(0.16, 0.14, 0.08, 0.92)
+                };
+            } else {
+                *border = BorderColor::all(Color::srgba(0.38, 0.44, 0.42, 0.62));
+                bg.0 = Color::srgba(0.07, 0.09, 0.10, 0.88);
+            }
+        } else {
+            node.display = Display::None;
+        }
     }
 
     if let Ok((mut status, mut col)) = texts.p3().single_mut() {
@@ -1190,15 +1301,19 @@ fn update_hud_telemetry(
             };
             col.0 = Color::srgb(0.98, 0.36, 0.30);
         } else if tank.is_loaded() {
-            status.0 = "READY".to_string();
+            status.0 = format!("READY [{}]", tank.active_shell().kind.short_label());
             col.0 = Color::srgb(0.32, 0.94, 0.42);
         } else {
-            status.0 = format!("{:.1}s", tank.reload_remaining * mods.reload_time_scale);
+            status.0 = format!(
+                "{:.1}s -> {}",
+                tank.reload_remaining * mods.reload_time_scale,
+                tank.selected_shell().kind.short_label()
+            );
             col.0 = Color::srgb(0.98, 0.74, 0.24);
         }
     }
 
-    if let Ok((mut node, mut bg)) = reload_bar_q.single_mut() {
+    if let Ok((mut node, mut bg)) = boxes.p0().single_mut() {
         node.width = Val::Percent(tank.reload_progress() * 100.0);
         bg.0 = if !player.alive || !mods.can_fire {
             Color::srgb(0.75, 0.22, 0.20)
@@ -1368,16 +1483,28 @@ fn update_hit_cam_panel(
                 format!("DESTROYED - {}", reason.short_label()),
                 Color::srgb(1.0, 0.36, 0.28),
             )
+        } else if rep.overpressure {
+            ("OVERPRESSURE!".to_string(), Color::srgb(1.0, 0.54, 0.22))
+        } else if rep.aphe_detonated {
+            (
+                format!("{} BURST PENETRATION", rep.shell_kind.short_label()),
+                Color::srgb(0.32, 0.96, 0.44),
+            )
         } else {
             match rep.outcome {
-                HitOutcome::Penetration => ("PENETRATION".to_string(), Color::srgb(0.32, 0.95, 0.42)),
-                HitOutcome::ExternalModuleHit => {
-                    ("MODULE HIT".to_string(), Color::srgb(0.96, 0.82, 0.30))
-                }
+                HitOutcome::Penetration => (
+                    format!("PENETRATION [{}]", rep.shell_kind.short_label()),
+                    Color::srgb(0.32, 0.95, 0.42),
+                ),
+                HitOutcome::ExternalModuleHit => (
+                    format!("BLAST / MODULE [{}]", rep.shell_kind.short_label()),
+                    Color::srgb(0.96, 0.82, 0.30),
+                ),
                 HitOutcome::Ricochet => ("RICOCHET".to_string(), Color::srgb(0.98, 0.68, 0.26)),
-                HitOutcome::NonPenetration => {
-                    ("NON-PENETRATION".to_string(), Color::srgb(0.76, 0.78, 0.76))
-                }
+                HitOutcome::NonPenetration => (
+                    "NON-PENETRATION".to_string(),
+                    Color::srgb(0.76, 0.78, 0.76),
+                ),
             }
         };
 
@@ -1390,9 +1517,19 @@ fn update_hit_cam_panel(
             rep.armor_type.label()
         ));
         lines.push(format!(
-            "Angle {:.0} deg | Eff {:.0}mm vs {:.0}mm AP",
-            rep.impact_angle_deg, rep.effective_armor_mm, rep.penetration_mm
+            "Angle {:.0} deg | Eff {:.0}mm vs {:.0}mm {}",
+            rep.impact_angle_deg,
+            rep.effective_armor_mm,
+            rep.penetration_mm,
+            rep.shell_kind.short_label(),
         ));
+        if rep.overpressure {
+            lines.push("HE OVERPRESSURE WAVE!".to_string());
+        } else if rep.aphe_detonated {
+            lines.push("INTERNAL BURSTING CHARGE DETONATED!".to_string());
+        } else if rep.over_penetrated {
+            lines.push("OVER-PENETRATION (FUSE NOT ARMED)".to_string());
+        }
         if !rep.killed_crew.is_empty() {
             let names: Vec<&str> = rep.killed_crew.iter().map(|c| c.label()).collect();
             lines.push(format!("CREW KO: {}", names.join(", ")));

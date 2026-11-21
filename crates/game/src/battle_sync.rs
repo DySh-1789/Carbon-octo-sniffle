@@ -91,6 +91,14 @@ fn gather_player_driving_and_fire_input(
     input.throttle = throttle;
     input.steer = steer;
 
+    if keys.just_pressed(KeyCode::Digit1) {
+        input.select_shell = Some(0);
+    } else if keys.just_pressed(KeyCode::Digit2) {
+        input.select_shell = Some(1);
+    } else if keys.just_pressed(KeyCode::Digit3) {
+        input.select_shell = Some(2);
+    }
+
     if mouse_buttons.just_pressed(MouseButton::Left) || keys.just_pressed(KeyCode::Space) {
         input.fire_queued = true;
     }

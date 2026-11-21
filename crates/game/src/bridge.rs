@@ -32,17 +32,21 @@ pub struct PlayerInputResource {
     pub aim_world_point: glam::Vec3,
     /// Latched fire request so brief clicks between fixed ticks are never dropped.
     pub fire_queued: bool,
+    /// Latched shell slot selection (`Digit1`/`Digit2`/`Digit3`).
+    pub select_shell: Option<usize>,
 }
 
 impl PlayerInputResource {
     pub fn take_for_step(&mut self) -> TankInput {
         let fire = self.fire_queued;
         self.fire_queued = false;
+        let select_shell = self.select_shell.take();
         TankInput {
             throttle: self.throttle,
             steer: self.steer,
             aim_world_point: self.aim_world_point,
             fire,
+            select_shell,
         }
     }
 }

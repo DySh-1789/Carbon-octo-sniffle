@@ -10,7 +10,7 @@ use crate::battle::{
     Team, VISION_RANGE, raycast_tanks, raycast_tanks_armor, resolve_tank_collisions,
 };
 use crate::catalog::VehicleCatalog;
-use crate::damage::{ArmorHit, HitOutcome, HitReport, KillReason, resolve_ap_impact};
+use crate::damage::{ArmorHit, HitOutcome, HitReport, KillReason};
 use crate::map_gen::{MapMetadata, default_metadata_for_world};
 use crate::tank::{FiredShot, TankConfig, TankInput, TankState};
 
@@ -503,6 +503,7 @@ impl SimWorld {
         let (min_x, max_x, min_z, max_z) = self.voxels.playable_bounds_xz();
         let margin = 120.0;
         let mut pending_hits: Vec<(Projectile, usize, ArmorHit, Vec3)> = Vec::new();
+        let mut pending_world_blasts: Vec<(Projectile, Vec3, Vec3, voxel::VoxelId)> = Vec::new();
 
         for mut proj in self.projectiles.drain(..) {
             let step_vec = proj.integrate(dt);
@@ -525,13 +526,7 @@ impl SimWorld {
                     continue;
                 }
                 if let Some(hit) = world_hit {
-                    self.recent_impacts.push(ImpactEvent {
-                        projectile_id: proj.id,
-                        position: hit.point,
-                        normal: hit.normal.as_vec3(),
-                        material: hit.material,
-                        impact_speed: proj.velocity.length(),
-                    });
+                    pending_world_blasts.push((proj, hit.point, hit.normal.as_vec3(), hit.material));
                     continue;
                 }
             }
@@ -549,8 +544,66 @@ impl SimWorld {
         }
         self.projectiles = surviving;
 
+        for (proj, pos, normal, material) in pending_world_blasts {
+            let destr = self.voxels.carve_explosion(
+                pos,
+                proj.shell.blast_radius_m,
+                proj.shell.blast_power,
+            );
+            let is_he = proj.shell.is_he();
+            let blast_radius_m = proj.shell.blast_radius_m;
+            self.recent_impacts.push(ImpactEvent {
+                projectile_id: proj.id,
+                position: pos,
+                normal,
+                material,
+                impact_speed: proj.velocity.length(),
+                blast_radius_m,
+                is_he,
+                destroyed_voxels: destr.destroyed_voxels,
+                debris: destr.debris,
+            });
+            if is_he {
+                self.apply_he_splash(&proj, pos);
+            }
+        }
+
         for (proj, ti, armor_hit, dir) in pending_hits {
             self.apply_armor_hit(&proj, ti, armor_hit, dir);
+        }
+    }
+
+    fn apply_he_splash(&mut self, proj: &Projectile, blast_center: Vec3) {
+        let mut splash_kills: Vec<(usize, KillReason)> = Vec::new();
+        for i in 0..self.tanks.len() {
+            if self.tanks[i].id == proj.owner || !self.tanks[i].alive {
+                continue;
+            }
+            let target_id = self.tanks[i].id;
+            let target_team = self.tanks[i].team;
+            let target_name = self.tanks[i].name.clone();
+            let target_state = self.tanks[i].state.clone();
+            if let Some(report) = crate::damage::resolve_he_splash(
+                proj.owner,
+                proj.owner_team,
+                target_id,
+                &target_name,
+                target_team,
+                true,
+                &target_state,
+                &mut self.tanks[i].damage,
+                &proj.shell,
+                blast_center,
+                &mut self.rng,
+            ) {
+                if let Some(reason) = report.kill_reason {
+                    splash_kills.push((i, reason));
+                }
+                self.recent_hit_reports.push(report);
+            }
+        }
+        for (idx, reason) in splash_kills {
+            self.finalize_tank_destruction(idx, proj.owner, proj.owner_team, reason);
         }
     }
 
@@ -562,7 +615,7 @@ impl SimWorld {
         let target_name = self.tanks[target_idx].name.clone();
         let target_state = self.tanks[target_idx].state.clone();
 
-        let report = resolve_ap_impact(
+        let report = crate::damage::resolve_shell_impact(
             proj.owner,
             proj.owner_team,
             target_id,

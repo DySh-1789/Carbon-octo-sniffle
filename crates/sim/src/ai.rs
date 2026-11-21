@@ -680,6 +680,7 @@ impl BotBrain {
             steer,
             aim_world_point: aim_point,
             fire: fire && me.damage.can_fire(),
+            select_shell: None,
         }
     }
 

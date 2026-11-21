@@ -46,8 +46,10 @@ pub struct TankConfig {
     pub muzzle_velocity: f32,
     /// Projectile aerodynamic drag factor (`1/s` velocity damping).
     pub shell_drag: f32,
-    /// Primary cannon shell specification (Stage 4: solid kinetic AP).
+    /// Primary cannon shell specification (kept synced with `ammo_rack[0]` for compatibility).
     pub shell: ShellSpec,
+    /// Full multi-shell loadout (`[1] AP/APHE/APHEBC/APCBC`, `[2] ...`, `[N] HE`).
+    pub ammo_rack: Vec<ShellSpec>,
     /// Historical plate thicknesses, slopes, armor types, and crew/transmission layout.
     pub armor: ArmorProfile,
     /// Horizontal bounding half-extent used to keep hull inside playable arena.
@@ -65,6 +67,7 @@ impl TankConfig {
     /// Balanced WWII medium tank profile matching the base voxel tank.
     pub fn stage1_basic(models: &TankVoxelModels) -> Self {
         let shell = ShellSpec::basic_75mm_ap();
+        let ammo_rack = vec![shell.clone(), ShellSpec::basic_75mm_he()];
         Self {
             vehicle_id: "basic_medium".to_string(),
             name: "Base Medium Tank".to_string(),
@@ -86,6 +89,7 @@ impl TankConfig {
             muzzle_velocity: shell.muzzle_velocity,
             shell_drag: shell.drag_coeff,
             shell,
+            ammo_rack,
             armor: ArmorProfile::basic_medium_tank(),
             hull_radius: 3.2,
             hull_half_width: 1.55,
@@ -94,6 +98,12 @@ impl TankConfig {
             gun_mount_offset: models.gun_mount_offset,
             muzzle_offset: models.muzzle_offset,
         }
+    }
+
+    /// Returns shell at `idx`, falling back safely to primary `shell`.
+    #[inline]
+    pub fn shell_at(&self, idx: usize) -> &ShellSpec {
+        self.ammo_rack.get(idx).unwrap_or(&self.shell)
     }
 }
 
@@ -108,6 +118,8 @@ pub struct TankInput {
     pub aim_world_point: Vec3,
     /// Trigger fire if gun is reloaded.
     pub fire: bool,
+    /// Optional shell slot selection (`0`, `1`, `2`).
+    pub select_shell: Option<usize>,
 }
 
 impl Default for TankInput {
@@ -117,6 +129,7 @@ impl Default for TankInput {
             steer: 0.0,
             aim_world_point: Vec3::new(0.0, 2.0, -100.0),
             fire: false,
+            select_shell: None,
         }
     }
 }
@@ -155,6 +168,10 @@ pub struct TankState {
     pub recoil_offset: f32,
     /// Total shots fired (handy telemetry / testing).
     pub shots_fired: u32,
+    /// Currently selected shell slot queued for loading (`0..ammo_rack.len()`).
+    pub selected_shell_idx: usize,
+    /// Shell slot currently chambered in the breech.
+    pub loaded_shell_idx: usize,
 }
 
 impl TankState {
@@ -171,7 +188,21 @@ impl TankState {
             reload_remaining: 0.0,
             recoil_offset: 0.0,
             shots_fired: 0,
+            selected_shell_idx: 0,
+            loaded_shell_idx: 0,
         }
+    }
+
+    /// Shell currently chambered in the gun breech (or next selected shell).
+    #[inline]
+    pub fn active_shell(&self) -> &ShellSpec {
+        self.config.shell_at(self.loaded_shell_idx)
+    }
+
+    /// Shell queued in the player's ammo bar selection.
+    #[inline]
+    pub fn selected_shell(&self) -> &ShellSpec {
+        self.config.shell_at(self.selected_shell_idx)
     }
 
     #[inline]
@@ -427,14 +458,31 @@ impl TankState {
             self.update_turret_and_gun(dt, input.aim_world_point, mods.turret_rate_scale);
         }
 
-        // 6. Reload (slowed when Loader dead or Breech damaged) & visual recoil decay
+        // 6. Shell selection & reload (slowed when Loader dead or Breech damaged) & recoil decay
+        if let Some(req_slot) = input.select_shell
+            && req_slot < self.config.ammo_rack.len()
+        {
+            self.selected_shell_idx = req_slot;
+            if self.is_loaded() && self.loaded_shell_idx != req_slot {
+                // Quick-swap breech to newly selected shell (55% of full reload)
+                self.reload_remaining = (self.config.reload_time * 0.55).max(0.8);
+                self.loaded_shell_idx = req_slot;
+            }
+        }
+
+        let was_reloading = self.reload_remaining > 0.0;
         let reload_rate = (1.0 / mods.reload_time_scale.max(0.1)).clamp(0.1, 2.0);
         self.reload_remaining = (self.reload_remaining - dt * reload_rate).max(0.0);
+        if was_reloading && self.reload_remaining <= 0.0 {
+            self.loaded_shell_idx = self.selected_shell_idx;
+        }
         self.recoil_offset = (self.recoil_offset - 1.1 * dt).max(0.0);
 
         // 7. Main gun firing (blocked if Gunner absent or Breech/Barrel destroyed)
         if input.fire && self.is_loaded() && mods.can_fire {
+            let fired_shell = self.active_shell().clone();
             self.reload_remaining = self.config.reload_time;
+            self.loaded_shell_idx = self.selected_shell_idx;
             self.recoil_offset = 0.32;
             self.shots_fired += 1;
 
@@ -449,9 +497,9 @@ impl TankState {
             return Some(FiredShot {
                 muzzle_position: self.muzzle_world_position(),
                 direction: dir,
-                velocity: dir * self.config.muzzle_velocity + hull_vel,
-                drag_coeff: self.config.shell_drag,
-                shell: self.config.shell.clone(),
+                velocity: dir * fired_shell.muzzle_velocity + hull_vel,
+                drag_coeff: fired_shell.drag_coeff,
+                shell: fired_shell,
             });
         }
 

@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use voxel::glam::{Quat, Vec3};
 
 use crate::battle::{SimRng, TankId, Team};
-use crate::shell::ShellSpec;
+use crate::shell::{ShellKind, ShellSpec};
 use crate::tank::TankState;
 
 /// Crew replacement duration in seconds when a surviving crewman moves to Driver or Gunner.
@@ -214,6 +214,7 @@ pub enum KillReason {
     CrewKnockedOut,
     AmmoRackDetonation,
     BurnedOut,
+    Overpressure,
 }
 
 impl KillReason {
@@ -222,6 +223,7 @@ impl KillReason {
             KillReason::CrewKnockedOut => "CREW KO",
             KillReason::AmmoRackDetonation => "AMMO RACK",
             KillReason::BurnedOut => "BURNED OUT",
+            KillReason::Overpressure => "OVERPRESSURE",
         }
     }
 }
@@ -853,6 +855,7 @@ pub struct HitReport {
     pub target_id: TankId,
     pub target_name: String,
     pub target_team: Team,
+    pub shell_kind: ShellKind,
     pub outcome: HitOutcome,
     pub plate_name: &'static str,
     pub armor_type: ArmorType,
@@ -863,6 +866,9 @@ pub struct HitReport {
     pub damaged_modules: Vec<(ModuleKind, ModuleHealth)>,
     pub killed_crew: Vec<CrewRole>,
     pub started_fire: bool,
+    pub overpressure: bool,
+    pub aphe_detonated: bool,
+    pub over_penetrated: bool,
     pub kill_reason: Option<KillReason>,
     pub position: Vec3,
     pub normal: Vec3,
@@ -1175,8 +1181,291 @@ pub fn raycast_tank_armor(
     best
 }
 
-/// Resolves a kinetic `AP` shell impact against a tank using the full War Thunder armor,
-/// overmatch, ricochet, spall cone, internal module, crew, fire, and ammo-rack pipeline.
+/// Unified Stage 4/7/8 shell impact resolver dispatching `HE` to blast/overpressure and
+/// `AP / APHE / APHEBC / APCBC` to kinetic penetration + spall + optional internal bursting charge.
+#[allow(clippy::too_many_arguments)]
+pub fn resolve_shell_impact(
+    shooter_id: TankId,
+    shooter_team: Team,
+    target_id: TankId,
+    target_name: &str,
+    target_team: Team,
+    target_alive: bool,
+    target_state: &TankState,
+    damage: &mut TankDamageState,
+    shell: &ShellSpec,
+    hit: ArmorHit,
+    incoming_dir: Vec3,
+    impact_speed: f32,
+    rng: &mut SimRng,
+) -> HitReport {
+    if shell.is_he() {
+        resolve_he_impact(
+            shooter_id,
+            shooter_team,
+            target_id,
+            target_name,
+            target_team,
+            target_alive,
+            target_state,
+            damage,
+            shell,
+            hit,
+            rng,
+        )
+    } else {
+        resolve_ap_impact(
+            shooter_id,
+            shooter_team,
+            target_id,
+            target_name,
+            target_team,
+            target_alive,
+            target_state,
+            damage,
+            shell,
+            hit,
+            incoming_dir,
+            impact_speed,
+            rng,
+        )
+    }
+}
+
+/// Stage 7 High-Explosive (`HE`) direct impact resolver: instant contact detonation, external
+/// track/barrel/ring blast damage, and War Thunder **Overpressure** against thin/open-top armor.
+#[allow(clippy::too_many_arguments)]
+pub fn resolve_he_impact(
+    shooter_id: TankId,
+    shooter_team: Team,
+    target_id: TankId,
+    target_name: &str,
+    target_team: Team,
+    target_alive: bool,
+    target_state: &TankState,
+    damage: &mut TankDamageState,
+    shell: &ShellSpec,
+    hit: ArmorHit,
+    rng: &mut SimRng,
+) -> HitReport {
+    let armor = &target_state.config.armor;
+    // HE blast wave seeks the weakest exposed armor plate reachable from the detonation point
+    // (direct plate, thin hull roof beneath turret, thin turret roof, or open-top fighting compartment).
+    let weakest_roof = armor.hull_roof_mm.min(armor.turret_roof_mm);
+    let exposed_weak_mm = if hit.frame == PartFrame::Turret || hit.frame == PartFrame::Gun {
+        hit.nominal_mm.min(weakest_roof)
+    } else {
+        hit.nominal_mm.min(armor.hull_roof_mm + 4.0)
+    };
+    let eff_armor = exposed_weak_mm * hit.armor_type.multiplier();
+
+    let mut report = HitReport {
+        shooter_id,
+        target_id,
+        target_name: target_name.to_string(),
+        target_team,
+        shell_kind: shell.kind,
+        outcome: HitOutcome::NonPenetration,
+        plate_name: hit.plate_name,
+        armor_type: hit.armor_type,
+        nominal_armor_mm: hit.nominal_mm,
+        impact_angle_deg: 0.0,
+        effective_armor_mm: eff_armor,
+        penetration_mm: shell.he_pen_mm,
+        damaged_modules: Vec::new(),
+        killed_crew: Vec::new(),
+        started_fire: false,
+        overpressure: false,
+        aphe_detonated: false,
+        over_penetrated: false,
+        kill_reason: None,
+        position: hit.world_point,
+        normal: hit.geom_normal_world,
+        ricochet_dir: None,
+        inert_hit: !target_alive || shooter_team == target_team,
+    };
+
+    if report.inert_hit {
+        return report;
+    }
+
+    damage.damage_events_received += 1;
+
+    // 1. External blast wave always damages nearby exposed tracks, gun barrel, and turret ring
+    let blast_r = (shell.blast_radius_m * 0.95).max(1.4);
+    let blast_dmg_base = 35.0 + shell.explosive_mass_kg * 38.0;
+    for m in &mut damage.modules {
+        if !matches!(
+            m.kind,
+            ModuleKind::LeftTrack
+                | ModuleKind::RightTrack
+                | ModuleKind::GunBarrel
+                | ModuleKind::TurretRing
+        ) {
+            continue;
+        }
+        let (fpos, frot) = m.frame.world_pose(target_state);
+        let center_world = fpos + frot * ((m.box_min + m.box_max) * 0.5);
+        let dist = center_world.distance(hit.world_point);
+        if dist <= blast_r {
+            let falloff = (1.0 - dist / blast_r).clamp(0.25, 1.0);
+            let (_, after) = m.apply_damage(blast_dmg_base * falloff);
+            if after != ModuleHealth::Intact {
+                record_module_hit(&mut report.damaged_modules, m.kind, after);
+                report.outcome = HitOutcome::ExternalModuleHit;
+            }
+        }
+    }
+
+    // 2. War Thunder Overpressure: HE blast pen breaches struck plate, thin roof, or open top!
+    if shell.he_pen_mm >= eff_armor {
+        report.outcome = HitOutcome::Penetration;
+        report.overpressure = true;
+        // Blast shockwave knocks out fighting-compartment crew & shreds interior modules
+        for c in &mut damage.crew {
+            if c.alive {
+                let seat = c.active_seat;
+                if c.apply_damage(120.0) && !report.killed_crew.contains(&seat) {
+                    report.killed_crew.push(seat);
+                }
+            }
+        }
+        let mut ammo_det = false;
+        for m in &mut damage.modules {
+            let (before, after) = m.apply_damage(45.0 + shell.explosive_mass_kg * 25.0);
+            if after != ModuleHealth::Intact {
+                record_module_hit(&mut report.damaged_modules, m.kind, after);
+            }
+            if m.kind == ModuleKind::AmmoRack
+                && before != ModuleHealth::Destroyed
+                && after == ModuleHealth::Destroyed
+            {
+                ammo_det = true;
+            }
+        }
+        if ammo_det && shell.explosive_mass_kg >= 1.5 && !armor.is_casemate && rng.next_f32() < 0.65 {
+            damage.turret_blown_off = true;
+            report.kill_reason = Some(KillReason::AmmoRackDetonation);
+        } else {
+            report.kill_reason = Some(KillReason::Overpressure);
+        }
+        return report;
+    }
+
+    // Large-caliber HE (> 2.5 kg TNT) hitting rear engine deck can still ignite fires even without overpressure
+    if shell.explosive_mass_kg >= 2.0
+        && matches!(hit.plate_name, "Hull Roof" | "Hull Rear")
+        && !damage.on_fire
+        && rng.next_f32() < 0.45
+    {
+        damage.on_fire = true;
+        damage.fire_elapsed = 0.0;
+        damage.fire_tick_accum = 0.0;
+        damage.fire_instigator = Some((shooter_id, shooter_team));
+        report.started_fire = true;
+    }
+
+    report
+}
+
+/// Stage 7 HE indirect splash damage when an HE shell detonates on nearby ground or walls.
+#[allow(clippy::too_many_arguments)]
+pub fn resolve_he_splash(
+    shooter_id: TankId,
+    shooter_team: Team,
+    target_id: TankId,
+    target_name: &str,
+    target_team: Team,
+    target_alive: bool,
+    target_state: &TankState,
+    damage: &mut TankDamageState,
+    shell: &ShellSpec,
+    blast_center: Vec3,
+    _rng: &mut SimRng,
+) -> Option<HitReport> {
+    if !target_alive || shooter_team == target_team || !shell.is_he() {
+        return None;
+    }
+    let hull_center = target_state.position + Vec3::Y * 1.1;
+    let dist = hull_center.distance(blast_center);
+    let splash_r = shell.blast_radius_m + 1.6;
+    if dist > splash_r {
+        return None;
+    }
+
+    let falloff = (1.0 - dist / splash_r).clamp(0.0, 1.0);
+    let effective_he_pen = shell.he_pen_mm * (0.45 + 0.55 * falloff);
+    let armor = &target_state.config.armor;
+    let weak_plate = armor.hull_roof_mm.min(armor.turret_roof_mm).min(armor.hull_side_mm);
+
+    let mut report = HitReport {
+        shooter_id,
+        target_id,
+        target_name: target_name.to_string(),
+        target_team,
+        shell_kind: shell.kind,
+        outcome: HitOutcome::ExternalModuleHit,
+        plate_name: "HE Splash",
+        armor_type: ArmorType::Rha,
+        nominal_armor_mm: weak_plate,
+        impact_angle_deg: 0.0,
+        effective_armor_mm: weak_plate,
+        penetration_mm: effective_he_pen,
+        damaged_modules: Vec::new(),
+        killed_crew: Vec::new(),
+        started_fire: false,
+        overpressure: false,
+        aphe_detonated: false,
+        over_penetrated: false,
+        kill_reason: None,
+        position: blast_center,
+        normal: Vec3::Y,
+        ricochet_dir: None,
+        inert_hit: false,
+    };
+
+    // External track & barrel splash damage
+    let ext_dmg = (30.0 + shell.explosive_mass_kg * 32.0) * falloff;
+    for m in &mut damage.modules {
+        if matches!(
+            m.kind,
+            ModuleKind::LeftTrack | ModuleKind::RightTrack | ModuleKind::GunBarrel
+        ) {
+            let (_, after) = m.apply_damage(ext_dmg);
+            if after != ModuleHealth::Intact {
+                record_module_hit(&mut report.damaged_modules, m.kind, after);
+            }
+        }
+    }
+
+    // Close big HE splash overpressures open-top & ultra-thin targets
+    if effective_he_pen >= weak_plate && dist <= shell.blast_radius_m * 0.9 {
+        report.outcome = HitOutcome::Penetration;
+        report.overpressure = true;
+        for c in &mut damage.crew {
+            if c.alive {
+                let seat = c.active_seat;
+                if c.apply_damage(120.0) && !report.killed_crew.contains(&seat) {
+                    report.killed_crew.push(seat);
+                }
+            }
+        }
+        report.kill_reason = Some(KillReason::Overpressure);
+        damage.damage_events_received += 1;
+        return Some(report);
+    }
+
+    if !report.damaged_modules.is_empty() {
+        damage.damage_events_received += 1;
+        Some(report)
+    } else {
+        None
+    }
+}
+
+/// Resolves a kinetic `AP` / `APHE` / `APHEBC` / `APCBC` shell impact against a tank using the full
+/// War Thunder armor, overmatch, ricochet, spall cone, delayed internal bursting charge,
+/// over-penetration, module, crew, fire, and ammo-rack pipeline.
 #[allow(clippy::too_many_arguments)]
 pub fn resolve_ap_impact(
     shooter_id: TankId,
@@ -1199,6 +1488,7 @@ pub fn resolve_ap_impact(
         target_id,
         target_name: target_name.to_string(),
         target_team,
+        shell_kind: shell.kind,
         outcome: HitOutcome::NonPenetration,
         plate_name: hit.plate_name,
         armor_type: hit.armor_type,
@@ -1209,6 +1499,9 @@ pub fn resolve_ap_impact(
         damaged_modules: Vec::new(),
         killed_crew: Vec::new(),
         started_fire: false,
+        overpressure: false,
+        aphe_detonated: false,
+        over_penetrated: false,
         kill_reason: None,
         position: hit.world_point,
         normal: hit.geom_normal_world,
@@ -1312,18 +1605,27 @@ pub fn resolve_ap_impact(
     let pen_dir = (dir * (1.0 - norm_weight) + (-plate_n) * norm_weight).normalize();
     let entry_pos = active_hit.world_point + pen_dir * 0.06;
 
-    // Track ammo-rack / fire triggers across primary ray + spall cone
+    // Track ammo-rack / fire triggers across primary ray + spall cone + optional APHE burst
     let mut ammo_destroyed_now = false;
     let mut fire_chance = 0.0f32;
 
     // 4a. Primary AP core penetrator ray (high kinetic damage deep through the tank)
     let core_damage = 80.0 + residual_ratio * 55.0;
+    let fuse_armed = shell.has_bursting_charge()
+        && (active_hit.nominal_mm >= shell.fuse_sensitivity_mm
+            || eff_armor >= shell.fuse_sensitivity_mm * 1.15);
+    let core_range = if fuse_armed {
+        shell.fuse_delay_m.clamp(0.75, 1.65)
+    } else {
+        5.4
+    };
+
     trace_internal_ray(
         target_state,
         damage,
         entry_pos,
         pen_dir,
-        5.4,
+        core_range,
         core_damage,
         true,
         &mut report,
@@ -1331,7 +1633,7 @@ pub fn resolve_ap_impact(
         &mut fire_chance,
     );
 
-    // 4b. Secondary armor spall cone (narrow directional cone for solid AP)
+    // 4b. Secondary armor spall cone (directional cone behind entry plate)
     let spall_count = shell.spall_ray_count.max(4) as usize;
     let cone_rad = (shell.spall_cone_half_angle_deg + residual_ratio * 9.0).to_radians();
     let (tangent, bitangent) = orthonormal_basis(pen_dir);
@@ -1339,7 +1641,6 @@ pub fn resolve_ap_impact(
     let spall_range = 2.0 + residual_ratio * 1.4;
 
     for i in 0..spall_count {
-        // Golden-angle spiral inside cone with small deterministic jitter
         let frac = (i as f32 + 0.5) / spall_count as f32;
         let radial = cone_rad * frac.sqrt();
         let az = i as f32 * 2.399_963 + rng.next_f32() * (TAU / spall_count as f32) * 0.35;
@@ -1360,6 +1661,61 @@ pub fn resolve_ap_impact(
         );
     }
 
+    // 4c. Stage 8 Bursting-Charge Detonation (`APHE` / `APHEBC` / `APCBC`):
+    // If fuse armed, shell explodes spherically 360° inside the fighting compartment after `fuse_delay_m`!
+    // If armor was too thin (< `fuse_sensitivity_mm`), shell over-penetrates without fusing!
+    if shell.has_bursting_charge() {
+        if fuse_armed {
+            report.aphe_detonated = true;
+            let burst_pos = entry_pos + pen_dir * shell.fuse_delay_m.clamp(0.70, 1.35);
+            let tnt = shell.explosive_mass_kg;
+            let burst_rays = (18 + (tnt * 18.0).round() as usize).clamp(18, 30);
+            let burst_range = (1.35 + tnt.powf(0.32) * 1.55).clamp(1.4, 3.0);
+            let burst_dmg = (42.0 + tnt.powf(0.45) * 92.0).clamp(45.0, 145.0);
+
+            // Uniform 360° Fibonacci sphere shrapnel rays from internal detonation point
+            let golden = std::f32::consts::PI * (3.0 - 5.0f32.sqrt());
+            for i in 0..burst_rays {
+                let y = 1.0 - (i as f32 / (burst_rays - 1).max(1) as f32) * 2.0;
+                let r = (1.0 - y * y).max(0.0).sqrt();
+                let theta = golden * i as f32 + rng.next_f32() * 0.2;
+                let burst_dir = Vec3::new(theta.cos() * r, y, theta.sin() * r).normalize();
+                trace_internal_ray(
+                    target_state,
+                    damage,
+                    burst_pos,
+                    burst_dir,
+                    burst_range,
+                    burst_dmg,
+                    false,
+                    &mut report,
+                    &mut ammo_destroyed_now,
+                    &mut fire_chance,
+                );
+            }
+            // Internal explosive blast wave also directly injures crew within close blast radius
+            let concuss_r = (0.95 + tnt.powf(0.35) * 1.15).clamp(1.0, 2.2);
+            for c in &mut damage.crew {
+                if !c.alive {
+                    continue;
+                }
+                let (fpos, frot) = c.frame.world_pose(target_state);
+                let cw = fpos + frot * ((c.box_min + c.box_max) * 0.5);
+                let d = cw.distance(burst_pos);
+                if d <= concuss_r {
+                    let seat = c.active_seat;
+                    let concuss_dmg = (55.0 + tnt * 120.0) * (1.0 - d / concuss_r).clamp(0.3, 1.0);
+                    if c.apply_damage(concuss_dmg) && !report.killed_crew.contains(&seat) {
+                        report.killed_crew.push(seat);
+                    }
+                }
+            }
+            fire_chance = fire_chance.max((0.18 + tnt * 0.35).min(0.65));
+        } else {
+            report.over_penetrated = true;
+        }
+    }
+
     // Step 5: Evaluate fire ignition, ammo-rack detonation, and < 2 crew knockout
     if fire_chance > 0.0 && !damage.on_fire && rng.next_f32() < fire_chance.min(0.75) {
         damage.on_fire = true;
@@ -1369,8 +1725,10 @@ pub fn resolve_ap_impact(
         report.started_fire = true;
     }
 
-    if ammo_destroyed_now && rng.next_f32() < 0.78 {
-        damage.turret_blown_off = true;
+    if ammo_destroyed_now && rng.next_f32() < if report.aphe_detonated { 0.88 } else { 0.78 } {
+        if !target_state.config.armor.is_casemate {
+            damage.turret_blown_off = true;
+        }
         report.kill_reason = Some(KillReason::AmmoRackDetonation);
         return report;
     }

@@ -5,7 +5,10 @@ pub mod model;
 pub mod raycast;
 pub mod tanks;
 
-pub use chunk::{CHUNK_SIZE, CHUNK_SIZE_I32, TANK_VOXEL_SIZE, VoxelChunk, VoxelWorld, WORLD_VOXEL_SIZE};
+pub use chunk::{
+    CHUNK_SIZE, CHUNK_SIZE_I32, DestructionResult, TANK_VOXEL_SIZE, VoxelChunk, VoxelWorld,
+    WORLD_VOXEL_SIZE,
+};
 pub use glam;
 pub use material::{MaterialRegistry, VoxelId, VoxelMaterial};
 pub use mesher::{VoxelMeshData, mesh_voxel_model, mesh_world_chunk};

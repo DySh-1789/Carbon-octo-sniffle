@@ -41,12 +41,16 @@ impl Projectile {
     }
 }
 
-/// Event emitted when a projectile collides with voxel geometry.
-#[derive(Copy, Clone, Debug)]
+/// Event emitted when a projectile collides with voxel geometry (including Stage 7 destruction debris).
+#[derive(Clone, Debug)]
 pub struct ImpactEvent {
     pub projectile_id: u64,
     pub position: Vec3,
     pub normal: Vec3,
     pub material: VoxelId,
     pub impact_speed: f32,
+    pub blast_radius_m: f32,
+    pub is_he: bool,
+    pub destroyed_voxels: u32,
+    pub debris: Vec<(Vec3, VoxelId)>,
 }

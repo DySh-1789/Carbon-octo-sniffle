@@ -469,4 +469,90 @@ impl VoxelWorld {
         }
         None
     }
+
+    /// Stage 7 real-time voxel destruction: carves craters in terrain and breaches walls/houses/trees
+    /// around `center_world` using each material's `blast_resistance`, while strictly protecting the
+    /// bottom bedrock layer (`bounds_min.y`) and map outer perimeter so tanks never fall out of bounds.
+    /// Automatically marks affected and neighboring chunks dirty for incremental greedy remeshing.
+    pub fn carve_explosion(
+        &mut self,
+        center_world: Vec3,
+        radius_m: f32,
+        blast_power: f32,
+    ) -> DestructionResult {
+        if radius_m <= 0.05 || blast_power <= 0.05 {
+            return DestructionResult::default();
+        }
+        let inv = 1.0 / self.voxel_size;
+        let r_vox = (radius_m * inv).ceil() as i32;
+        let cvx = (center_world.x * inv).floor() as i32;
+        let cvy = (center_world.y * inv).floor() as i32;
+        let cvz = (center_world.z * inv).floor() as i32;
+
+        let min_x = (cvx - r_vox).max(self.bounds_min.x + 2);
+        let max_x = (cvx + r_vox).min(self.bounds_max.x - 2);
+        let min_y = (cvy - r_vox).max(self.bounds_min.y + 1);
+        let max_y = (cvy + r_vox).min(self.bounds_max.y);
+        let min_z = (cvz - r_vox).max(self.bounds_min.z + 2);
+        let max_z = (cvz + r_vox).min(self.bounds_max.z - 2);
+
+        let mut destroyed = 0u32;
+        let mut debris: Vec<(Vec3, VoxelId)> = Vec::new();
+        let mut scorch_candidates: Vec<IVec3> = Vec::new();
+
+        for vy in min_y..=max_y {
+            for vz in min_z..=max_z {
+                for vx in min_x..=max_x {
+                    let pos = IVec3::new(vx, vy, vz);
+                    let id = self.get_voxel(pos);
+                    if id.is_air() || id.is_water() {
+                        continue;
+                    }
+                    let world_c = self.voxel_to_world_center(pos);
+                    let dist = world_c.distance(center_world);
+                    if dist > radius_m {
+                        continue;
+                    }
+                    let norm = (dist / radius_m).clamp(0.0, 1.0);
+                    let falloff = (1.0 - norm.powf(1.35)).max(0.0);
+                    let resist = self.materials.get(id).blast_resistance;
+                    if blast_power * falloff >= resist {
+                        self.set_voxel(pos, VoxelId::AIR);
+                        destroyed += 1;
+                        if debris.len() < 16 && (destroyed <= 6 || destroyed.is_multiple_of(3)) {
+                            debris.push((world_c, id));
+                        }
+                        if vy > self.bounds_min.y + 1 {
+                            scorch_candidates.push(IVec3::new(vx, vy - 1, vz));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Scorch newly exposed grass/snow crater bottoms into churned dirt or rubble for visual realism
+        for below in scorch_candidates {
+            let b_id = self.get_voxel(below);
+            if matches!(
+                b_id,
+                VoxelId::GRASS | VoxelId::GRASS_DARK | VoxelId::SNOW | VoxelId::SAND
+            ) {
+                self.set_voxel(below, VoxelId::DIRT);
+            } else if matches!(b_id, VoxelId::BRICK | VoxelId::PLASTER_WALL | VoxelId::MUDBRICK) {
+                self.set_voxel(below, VoxelId::RUBBLE);
+            }
+        }
+
+        DestructionResult {
+            destroyed_voxels: destroyed,
+            debris,
+        }
+    }
+}
+
+/// Summary of terrain/building voxels shattered by a shell impact or HE blast.
+#[derive(Clone, Debug, Default)]
+pub struct DestructionResult {
+    pub destroyed_voxels: u32,
+    pub debris: Vec<(Vec3, VoxelId)>,
 }
