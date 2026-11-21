@@ -3,6 +3,7 @@ pub mod ballistics;
 pub mod battle;
 pub mod catalog;
 pub mod damage;
+pub mod economy;
 pub mod map_gen;
 pub mod maps;
 pub mod shell;
@@ -24,6 +25,10 @@ pub use damage::{
     ModuleHealth, ModuleKind, ModuleState, NO_LOADER_RELOAD_MULT, PartFrame, TankDamageState,
     raycast_tank_armor, resolve_ap_impact, resolve_he_impact, resolve_he_splash,
     resolve_shell_impact,
+};
+pub use economy::{
+    BattleRewardInput, BattleRewardSummary, PlayerProfile, VehicleEconomyCost, VehicleOwnership,
+    economy_cost_for_tier,
 };
 pub use map_gen::{
     CaptureZoneDef, MapAtmosphere, MapMetadata, MinimapData, TacticalPosition,

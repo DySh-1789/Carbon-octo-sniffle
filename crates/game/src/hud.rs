@@ -3,13 +3,13 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::window::PrimaryWindow;
 use sim::{
-    BattleOutcome, CrewRole, HitOutcome, MAX_TANKS, ModuleHealth, ModuleKind, START_TICKETS, Team,
-    tier_roman,
+    BattleOutcome, BattleRewardInput, CrewRole, HitOutcome, MAX_TANKS, ModuleHealth, ModuleKind,
+    START_TICKETS, Team, tier_roman,
 };
 
 use crate::bridge::{BattleControlResource, PendingSimEvents, SimResource, to_bevy_vec3};
 use crate::camera::{CameraMode, MainTankCamera, TankCameraController};
-use crate::state::{AppState, BattleEntity};
+use crate::state::{AppState, BattleEntity, EconomyResource};
 
 const MINIMAP_DISPLAY_PX: f32 = 192.0;
 const KILL_FEED_ROWS: usize = 5;
@@ -189,11 +189,16 @@ impl Plugin for HudPlugin {
     }
 }
 
-fn reset_hud_buffers(mut feed: ResMut<KillFeedBuffer>, mut hitcam: ResMut<HitCamState>) {
+fn reset_hud_buffers(
+    mut feed: ResMut<KillFeedBuffer>,
+    mut hitcam: ResMut<HitCamState>,
+    mut economy: ResMut<EconomyResource>,
+) {
     feed.entries.clear();
     hitcam.timer = 0.0;
     hitcam.title.clear();
     hitcam.body.clear();
+    economy.settled_this_battle = false;
 }
 
 fn setup_crosshair_and_telemetry(mut commands: Commands, sim: Res<SimResource>) {
@@ -1882,9 +1887,11 @@ fn update_hud_minimap(
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn update_battle_end_modal_and_buttons(
     sim: Res<SimResource>,
+    pending: Res<PendingSimEvents>,
     cam_ctrl: Res<TankCameraController>,
     mouse_buttons: Res<ButtonInput<MouseButton>>,
     window_q: Query<&Window, With<PrimaryWindow>>,
+    mut economy: ResMut<EconomyResource>,
     mut control: ResMut<BattleControlResource>,
     mut overlay_q: Query<&mut Node, With<BattleEndOverlay>>,
     mut texts: ParamSet<(
@@ -1898,8 +1905,37 @@ fn update_battle_end_modal_and_buttons(
         &mut BackgroundColor,
     )>,
 ) {
+    if pending.battle_restarted {
+        economy.settled_this_battle = false;
+    }
+
     let battle = &sim.0.battle;
     let battle_over = battle.is_over();
+
+    if battle_over && !economy.settled_this_battle {
+        let player = sim.0.player_unit();
+        let allied_zones = battle.owned_zone_count(Team::Allies) as u32;
+        let summary = economy.profile.settle_battle(&BattleRewardInput {
+            nation: player.state.config.nation,
+            tier: player.state.config.tier,
+            outcome: battle.outcome,
+            player_survived: player.alive,
+            kills: player.kills,
+            penetrations: player.hits_landed,
+            allied_zones_held: allied_zones,
+        });
+        let sign = if summary.net_cr >= 0 { "+" } else { "" };
+        economy.status_notice = format!(
+            "LAST BATTLE: {}{} CR | +{} {} RP",
+            sign,
+            summary.net_cr,
+            summary.rp_earned,
+            summary.nation.short_tag(),
+        );
+        economy.last_reward = Some(summary);
+        economy.settled_this_battle = true;
+        economy.save_to_disk();
+    }
 
     if let Ok(mut overlay) = overlay_q.single_mut() {
         overlay.display = if battle_over {
@@ -1925,8 +1961,25 @@ fn update_battle_end_modal_and_buttons(
         if let Ok(mut stats) = texts.p1().single_mut() {
             let player = sim.0.player_unit();
             let secs = battle.battle_time as u32;
+            let econ_block = if let Some(r) = &economy.last_reward {
+                let sign = if r.net_cr >= 0 { "+" } else { "" };
+                format!(
+                    "\n--- ECONOMY (UPDATE 0.1) ---\nGROSS: +{} CR  |  REPAIR: -{} CR\nNET: {}{} CR  |  +{} {} RP\nWALLET: {} CR  |  {} {} RP",
+                    r.gross_cr,
+                    r.repair_cr,
+                    sign,
+                    r.net_cr,
+                    r.rp_earned,
+                    r.nation.short_tag(),
+                    r.new_credits,
+                    r.new_nation_rp,
+                    r.nation.short_tag(),
+                )
+            } else {
+                String::new()
+            };
             stats.0 = format!(
-                "{}  (TIER {})\nALLIES {:.0}  -  {:.0} AXIS\nBATTLE TIME {:02}:{:02}\nYOUR KILLS: {}  |  PENETRATIONS: {}",
+                "{}  (TIER {})\nALLIES {:.0}  -  {:.0} AXIS\nBATTLE TIME {:02}:{:02}\nYOUR KILLS: {}  |  PENETRATIONS: {}{}",
                 player.state.config.name,
                 tier_roman(player.state.config.tier),
                 battle.allies_tickets.ceil(),
@@ -1935,6 +1988,7 @@ fn update_battle_end_modal_and_buttons(
                 secs % 60,
                 player.kills,
                 player.hits_landed,
+                econ_block,
             );
         }
     }

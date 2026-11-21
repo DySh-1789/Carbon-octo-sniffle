@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use sim::{MapId, Nation, VehicleCatalog};
+use sim::{BattleRewardSummary, MapId, Nation, PlayerProfile, VehicleCatalog};
 
 /// Top-level application state: Industrial Hangar / Tech Tree vs live 6v6 Ground Battle.
 #[derive(States, Default, Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -29,6 +29,77 @@ impl Default for CatalogResource {
     }
 }
 
+/// Update 0.1 Economy & Progression state (Silver Credits, Nation RP, research/ownership & battle receipt).
+#[derive(Resource, Clone, Debug)]
+pub struct EconomyResource {
+    pub profile: PlayerProfile,
+    pub last_reward: Option<BattleRewardSummary>,
+    pub settled_this_battle: bool,
+    pub status_notice: String,
+    pub persist_to_disk: bool,
+}
+
+impl Default for EconomyResource {
+    fn default() -> Self {
+        Self::new_in_memory()
+    }
+}
+
+impl EconomyResource {
+    pub fn new_in_memory() -> Self {
+        Self {
+            profile: PlayerProfile::new_starter(),
+            last_reward: None,
+            settled_this_battle: false,
+            status_notice: "UPDATE 0.1 ECONOMY | FREE TIER I RESERVES READY".to_string(),
+            persist_to_disk: false,
+        }
+    }
+
+    /// Loads saved profile from `~/.carbon_armor_profile.txt` on native builds, or starts fresh on WASM.
+    pub fn load_or_default() -> Self {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if let Some(path) = Self::save_path()
+                && let Ok(text) = std::fs::read_to_string(&path)
+                && let Some(profile) = PlayerProfile::from_save_text(&text)
+            {
+                return Self {
+                    profile,
+                    last_reward: None,
+                    settled_this_battle: false,
+                    status_notice: "PROFILE LOADED | READY FOR BATTLE".to_string(),
+                    persist_to_disk: true,
+                };
+            }
+            let mut res = Self::new_in_memory();
+            res.persist_to_disk = true;
+            res
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            Self::new_in_memory()
+        }
+    }
+
+    pub fn save_to_disk(&self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.persist_to_disk
+            && let Some(path) = Self::save_path()
+        {
+            let _ = std::fs::write(path, self.profile.to_save_text());
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn save_path() -> Option<std::path::PathBuf> {
+        let home = std::env::var_os("HOME")?;
+        let mut path = std::path::PathBuf::from(home);
+        path.push(".carbon_armor_profile.txt");
+        Some(path)
+    }
+}
+
 /// Currently selected nation, vehicle, battlefield map, and Hangar UI mode.
 #[derive(Resource, Clone, Debug)]
 pub struct SelectedVehicle {
@@ -44,7 +115,7 @@ impl Default for SelectedVehicle {
     fn default() -> Self {
         Self {
             nation: Nation::Usa,
-            vehicle_id: "us_m4a1".to_string(),
+            vehicle_id: "us_m2a4".to_string(),
             map_id: MapId::EuropeanValley,
             view_mode: HangarViewMode::Podium,
             preview_dirty: true,

@@ -18,16 +18,20 @@ use crate::flags::setup_flag_textures;
 use crate::hangar_ui::HangarPlugin;
 use crate::hud::HudPlugin;
 use crate::state::{
-    AppState, BattleEntity, HangarEntity, despawn_tagged, setup_tank_paint_materials,
+    AppState, BattleEntity, EconomyResource, HangarEntity, despawn_tagged,
+    setup_tank_paint_materials,
 };
 use crate::tank_view::TankViewPlugin;
 use crate::voxel_render::VoxelRenderPlugin;
 
-/// Complete interactive game plugin bundle (Hangar + Tech Tree + 6v6 Ground Battle).
+/// Complete interactive game plugin bundle (Hangar + Tech Tree + Economy v0.1 + 6v6 Ground Battle).
 pub struct TankGamePlugin;
 
 impl Plugin for TankGamePlugin {
     fn build(&self, app: &mut App) {
+        if !app.world().contains_resource::<EconomyResource>() {
+            app.insert_resource(EconomyResource::load_or_default());
+        }
         app.init_state::<AppState>()
             .add_systems(Startup, (setup_tank_paint_materials, setup_flag_textures))
             .add_systems(OnExit(AppState::Hangar), despawn_tagged::<HangarEntity>)
@@ -59,9 +63,10 @@ mod tests {
         BattleControlResource, PendingSimEvents, PlayerInputResource, SimResource,
     };
     use crate::state::{
-        AppState, BattleEntity, CatalogResource, HangarEntity, HangarViewMode, SelectedVehicle,
+        AppState, BattleEntity, CatalogResource, EconomyResource, HangarEntity, HangarViewMode,
+        SelectedVehicle,
     };
-    use sim::{Nation, Team};
+    use sim::{BattleOutcome, MapId, Nation, Team, VehicleOwnership};
     use voxel::glam::Vec3 as SimVec3;
 
     #[test]
@@ -119,7 +124,10 @@ mod tests {
                 sim.0.player_tank().position
             );
             assert_eq!(sim.0.player_tank().shots_fired, 1);
-            assert_eq!(sim.0.player_unit().damage.alive_crew_count(), 5);
+            assert_eq!(
+                sim.0.player_unit().damage.alive_crew_count(),
+                sim.0.player_unit().damage.total_crew_count()
+            );
 
             // Frame events are cleared cleanly in PostUpdate after Update consumers read them
             let events = app.world().resource::<PendingSimEvents>();
@@ -151,6 +159,7 @@ mod tests {
         .init_resource::<Assets<Mesh>>()
         .init_resource::<Assets<StandardMaterial>>()
         .init_resource::<Assets<Image>>()
+        .insert_resource(EconomyResource::new_in_memory())
         .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
             1.0 / 60.0,
         )))
@@ -176,11 +185,12 @@ mod tests {
             0
         );
 
-        // 2. Select USSR Tier VII T-44-100, toggle TechTree & back, and launch Tier VII battle
+        // 2. Select USSR Tier VII T-44-100, toggle TechTree & back, and launch Tier VII battle on El Alamein
         {
             let mut sel = app.world_mut().resource_mut::<SelectedVehicle>();
             sel.nation = Nation::Ussr;
             sel.vehicle_id = "su_t44_100".to_string();
+            sel.map_id = MapId::ElAlamein;
             sel.view_mode = HangarViewMode::TechTree;
             sel.preview_dirty = true;
         }
@@ -193,11 +203,11 @@ mod tests {
 
         {
             let catalog = app.world().resource::<CatalogResource>().0.clone();
-            let vid = app.world().resource::<SelectedVehicle>().vehicle_id.clone();
+            let sel = app.world().resource::<SelectedVehicle>().clone();
             app.world_mut()
                 .resource_mut::<SimResource>()
                 .0
-                .configure_tier_battle(&catalog, &vid, 6);
+                .configure_battle_on_map(sel.map_id, &catalog, &sel.vehicle_id, 6);
             app.world_mut()
                 .resource_mut::<NextState<AppState>>()
                 .set(AppState::InBattle);
@@ -223,20 +233,51 @@ mod tests {
                 > 0
         );
 
-        // 3. Exercise Stage 4/5 turret blow-off, active fire emitter, and WT damage HUD on T-44-100 battle
+        // 3. Exercise Stage 4/5/7/8 shell switching, turret blow-off, active fire emitter, and WT damage HUD
         {
             let mut sim = app.world_mut().resource_mut::<SimResource>();
+            assert_eq!(sim.0.map.id, "el_alamein");
             assert_eq!(sim.0.player_tank().config.vehicle_id, "su_t44_100");
             assert_eq!(sim.0.player_tank().config.tier, 7);
+            assert!(sim.0.player_tank().config.ammo_rack.len() >= 2);
             sim.0.tanks[6].alive = false;
             sim.0.tanks[6].damage.turret_blown_off = true;
             sim.0.tanks[0].damage.on_fire = true;
         }
+        // Switch player ammo slot to HE (last slot)
+        app.world_mut()
+            .resource_mut::<PlayerInputResource>()
+            .select_shell = Some(2);
         for _ in 0..8 {
             app.update();
         }
+        assert_eq!(
+            app.world().resource::<SimResource>().0.player_tank().selected_shell_idx,
+            2,
+            "Player should be able to switch to slot 3 (HE) cleanly"
+        );
 
-        // 4. Verify in-battle restart lifecycle
+        // 4. Verify Update 0.1 Economy settles once when battle ends with Allied Victory
+        {
+            let mut sim = app.world_mut().resource_mut::<SimResource>();
+            sim.0.tanks[0].kills = 2;
+            sim.0.tanks[0].hits_landed = 4;
+            sim.0.battle.outcome = BattleOutcome::Victory(Team::Allies);
+        }
+        app.update();
+        app.update();
+        {
+            let econ = app.world().resource::<EconomyResource>();
+            assert!(econ.settled_this_battle);
+            let reward = econ.last_reward.as_ref().expect("battle reward settled");
+            assert!(reward.victory);
+            assert!(reward.net_cr > 2_000);
+            assert!(reward.rp_earned >= 450);
+            assert_eq!(econ.profile.battles_played, 1);
+            assert_eq!(econ.profile.victories, 1);
+        }
+
+        // 5. Verify in-battle restart resets battle & economy settlement guard
         app.world_mut()
             .resource_mut::<BattleControlResource>()
             .restart_requested = true;
@@ -247,9 +288,11 @@ mod tests {
             assert_eq!(sim.0.tanks.len(), 12);
             assert!(!sim.0.tanks[6].damage.turret_blown_off);
             assert!(!sim.0.tanks[0].damage.on_fire);
+            let econ = app.world().resource::<EconomyResource>();
+            assert!(!econ.settled_this_battle);
         }
 
-        // 5. Return to Hangar, verify BattleEntity cleanup, select M4A3E2 (76) W and enter second battle
+        // 6. Return to Hangar, verify BattleEntity cleanup, and research + buy USSR Tier II T-50
         app.world_mut()
             .resource_mut::<BattleControlResource>()
             .return_to_hangar = true;
@@ -270,6 +313,23 @@ mod tests {
                 .iter(app.world())
                 .count()
                 > 0
+        );
+
+        let catalog = app.world().resource::<CatalogResource>().0.clone();
+        let mut econ = app.world_mut().resource_mut::<EconomyResource>();
+        assert_eq!(
+            econ.profile.ownership_state(&catalog, "su_t50"),
+            VehicleOwnership::Researchable
+        );
+        econ.profile
+            .research_vehicle(&catalog, "su_t50")
+            .expect("USSR RP from victory unlocks Tier II T-50");
+        econ.profile
+            .buy_vehicle(&catalog, "su_t50")
+            .expect("Silver CR buys researched Tier II T-50");
+        assert_eq!(
+            econ.profile.ownership_state(&catalog, "su_t50"),
+            VehicleOwnership::Owned
         );
     }
 }

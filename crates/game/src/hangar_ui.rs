@@ -2,14 +2,14 @@ use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
 use bevy::prelude::*;
 use bevy::render::view::Msaa;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
-use sim::{MapId, Nation, VehicleSpec, tier_roman};
+use sim::{MapId, Nation, VehicleOwnership, VehicleSpec, economy_cost_for_tier, tier_roman};
 use voxel::mesh_voxel_model;
 
 use crate::bridge::{SimResource, to_bevy_vec3};
 use crate::flags::FlagTextures;
 use crate::state::{
-    AppState, CatalogResource, HangarEntity, HangarViewMode, SelectedVehicle, TankPaintMaterials,
-    nation_accent_color,
+    AppState, CatalogResource, EconomyResource, HangarEntity, HangarViewMode, SelectedVehicle,
+    TankPaintMaterials, nation_accent_color,
 };
 use crate::voxel_render::voxel_mesh_to_bevy;
 
@@ -67,8 +67,11 @@ struct HangarLayer(HangarViewMode);
 /// Unified dynamic text slots so one single query refreshes the entire Hangar & Tech Tree UI.
 #[derive(Component, Clone, Copy, PartialEq, Eq)]
 enum HangarDynamicText {
+    PrimaryActionLabel,
     TopVehicleBanner,
     MapSelectorLabel,
+    EconomyNotice,
+    WalletSummary,
     SpecsTitle,
     SpecsFirepower,
     SpecsProtection,
@@ -470,7 +473,7 @@ fn setup_hangar_ui(
                     HangarAction::EnterBattle,
                     HangarButtonStyle::BattlePrimary,
                     Node {
-                        width: Val::Px(206.0),
+                        width: Val::Px(248.0),
                         height: Val::Px(46.0),
                         justify_content: JustifyContent::Center,
                         align_items: AlignItems::Center,
@@ -482,9 +485,10 @@ fn setup_hangar_ui(
                 ))
                 .with_children(|btn| {
                     btn.spawn((
+                        HangarDynamicText::PrimaryActionLabel,
                         Text::new("BATTLE!"),
                         TextFont {
-                            font_size: FontSize::Px(21.0),
+                            font_size: FontSize::Px(19.0),
                             ..default()
                         },
                         TextColor(Color::WHITE),
@@ -503,7 +507,7 @@ fn setup_hangar_ui(
                 .with_children(|banner| {
                     banner.spawn((
                         HangarDynamicText::TopVehicleBanner,
-                        Text::new("USA | TIER III | M4A1 SHERMAN | MEDIUM TANK"),
+                        Text::new("USA | TIER I | M2A4 | LIGHT TANK"),
                         TextFont {
                             font_size: FontSize::Px(12.5),
                             ..default()
@@ -587,15 +591,31 @@ fn setup_hangar_ui(
                             ));
                         });
                 });
+
+                // Subtle Update 0.1 Economy notice banner (last battle receipt / research & purchase feedback)
+                top.spawn((
+                    HangarDynamicText::EconomyNotice,
+                    Text::new("UPDATE 0.1 ECONOMY | FREE TIER I RESERVES READY"),
+                    TextFont {
+                        font_size: FontSize::Px(10.5),
+                        ..default()
+                    },
+                    TextColor(Color::srgb(0.95, 0.82, 0.44)),
+                    BackgroundColor(Color::srgba(0.04, 0.06, 0.09, 0.72)),
+                    Node {
+                        padding: UiRect::axes(Val::Px(10.0), Val::Px(2.0)),
+                        ..default()
+                    },
+                ));
             });
 
-            // 1b. Left Vertical Navigation Rail (HANGAR / TECH TREE / NATIONS)
+            // 1b. Left Vertical Navigation Rail (HANGAR / TECH TREE / WALLET / NATIONS)
             root.spawn((
                 Node {
                     position_type: PositionType::Absolute,
                     left: Val::Px(14.0),
                     top: Val::Px(14.0),
-                    width: Val::Px(168.0),
+                    width: Val::Px(178.0),
                     padding: UiRect::all(Val::Px(10.0)),
                     flex_direction: FlexDirection::Column,
                     row_gap: Val::Px(6.0),
@@ -615,13 +635,36 @@ fn setup_hangar_ui(
                     TextColor(Color::srgb(0.95, 0.74, 0.32)),
                 ));
                 rail.spawn((
-                    Text::new("STAGE 5 | 24 TANKS"),
+                    Text::new("UPDATE 0.1 | ECONOMY"),
                     TextFont {
                         font_size: FontSize::Px(10.0),
                         ..default()
                     },
-                    TextColor(Color::srgb(0.62, 0.68, 0.76)),
+                    TextColor(Color::srgb(0.56, 0.82, 0.96)),
                 ));
+
+                // Compact Update 0.1 Economy Wallet card (CR + Nation RP + Career)
+                rail.spawn((
+                    Node {
+                        width: Val::Percent(100.0),
+                        padding: UiRect::all(Val::Px(7.0)),
+                        border: UiRect::all(Val::Px(1.0)),
+                        ..default()
+                    },
+                    BorderColor::all(Color::srgba(0.86, 0.70, 0.30, 0.52)),
+                    BackgroundColor(Color::srgba(0.09, 0.11, 0.14, 0.92)),
+                ))
+                .with_children(|wallet| {
+                    wallet.spawn((
+                        HangarDynamicText::WalletSummary,
+                        Text::new("CR: 2500\nUSA RP: 0\nBTL 0 | WIN 0 | KILLS 0"),
+                        TextFont {
+                            font_size: FontSize::Px(10.5),
+                            ..default()
+                        },
+                        TextColor(Color::srgb(0.96, 0.86, 0.50)),
+                    ));
+                });
 
                 // Navigation Tabs
                 for (label, mode) in [
@@ -965,14 +1008,41 @@ fn setup_hangar_ui(
                 BackgroundColor(Color::srgba(0.06, 0.09, 0.13, 0.82)),
             ))
             .with_children(|tree| {
+                tree.spawn(Node {
+                    width: Val::Percent(100.0),
+                    justify_content: JustifyContent::SpaceBetween,
+                    align_items: AlignItems::Center,
+                    ..default()
+                })
+                .with_children(|hdr| {
+                    hdr.spawn((
+                        HangarDynamicText::TechTreeHeader,
+                        Text::new("USA ARMORED FORCES  |  TIERS I - VIII"),
+                        TextFont {
+                            font_size: FontSize::Px(16.0),
+                            ..default()
+                        },
+                        TextColor(Color::srgb(0.95, 0.84, 0.44)),
+                    ));
+                    hdr.spawn((
+                        HangarDynamicText::WalletSummary,
+                        Text::new("CR: 2500 | USA RP: 0"),
+                        TextFont {
+                            font_size: FontSize::Px(11.5),
+                            ..default()
+                        },
+                        TextColor(Color::srgb(0.96, 0.86, 0.50)),
+                    ));
+                });
+
                 tree.spawn((
-                    HangarDynamicText::TechTreeHeader,
-                    Text::new("USA ARMORED FORCES  |  TIERS I - VIII"),
+                    HangarDynamicText::EconomyNotice,
+                    Text::new("UPDATE 0.1 ECONOMY | FREE TIER I RESERVES READY"),
                     TextFont {
-                        font_size: FontSize::Px(16.0),
+                        font_size: FontSize::Px(10.5),
                         ..default()
                     },
-                    TextColor(Color::srgb(0.95, 0.84, 0.44)),
+                    TextColor(Color::srgb(0.68, 0.88, 0.98)),
                 ));
 
                 for (row_label, tiers) in [
@@ -1002,7 +1072,7 @@ fn setup_hangar_ui(
                                 Node {
                                     flex_grow: 1.0,
                                     flex_basis: Val::Px(0.0),
-                                    height: Val::Px(124.0),
+                                    height: Val::Px(134.0),
                                     padding: UiRect::all(Val::Px(10.0)),
                                     flex_direction: FlexDirection::Column,
                                     justify_content: JustifyContent::SpaceBetween,
@@ -1048,7 +1118,7 @@ fn setup_hangar_ui(
                 }
             });
 
-            // 2c. Right Spec Preview Card + VIEW IN HANGAR & BATTLE! buttons (matching images.jpg)
+            // 2c. Right Spec Preview Card + VIEW IN HANGAR & PRIMARY ACTION button (matching images.jpg)
             root.spawn((
                 Node {
                     width: Val::Px(296.0),
@@ -1065,7 +1135,7 @@ fn setup_hangar_ui(
             .with_children(|panel| {
                 panel.spawn((
                     HangarDynamicText::TechSpecTitle,
-                    Text::new("M4A1 SHERMAN"),
+                    Text::new("M2A4"),
                     TextFont {
                         font_size: FontSize::Px(16.0),
                         ..default()
@@ -1077,7 +1147,7 @@ fn setup_hangar_ui(
                     HangarDynamicText::TechSpecBody,
                     Text::new(""),
                     TextFont {
-                        font_size: FontSize::Px(12.0),
+                        font_size: FontSize::Px(11.5),
                         ..default()
                     },
                     TextColor(Color::srgb(0.88, 0.92, 0.96)),
@@ -1134,9 +1204,10 @@ fn setup_hangar_ui(
                         ))
                         .with_children(|b| {
                             b.spawn((
+                                HangarDynamicText::PrimaryActionLabel,
                                 Text::new("BATTLE!"),
                                 TextFont {
-                                    font_size: FontSize::Px(18.0),
+                                    font_size: FontSize::Px(16.0),
                                     ..default()
                                 },
                                 TextColor(Color::WHITE),
@@ -1153,6 +1224,7 @@ fn handle_hangar_ui_interaction(
     mouse_buttons: Res<ButtonInput<MouseButton>>,
     window_q: Query<&Window, With<PrimaryWindow>>,
     catalog: Res<CatalogResource>,
+    mut economy: ResMut<EconomyResource>,
     mut selected: ResMut<SelectedVehicle>,
     mut sim: ResMut<SimResource>,
     mut next_state: ResMut<NextState<AppState>>,
@@ -1171,11 +1243,20 @@ fn handle_hangar_ui_interaction(
         .and_then(|w| w.physical_cursor_position());
     let clicked = mouse_buttons.just_pressed(MouseButton::Left);
 
-    let current_tier = catalog
+    let current_spec = catalog
         .0
         .by_id(&selected.vehicle_id)
-        .map_or(3, |v| v.tier);
-    let mut trigger_battle = keys.just_pressed(KeyCode::Enter);
+        .unwrap_or_else(|| catalog.0.default_vehicle());
+    let current_tier = current_spec.tier;
+    let current_ownership = economy
+        .profile
+        .ownership_state(&catalog.0, &selected.vehicle_id);
+    let can_research_curr = economy
+        .profile
+        .can_research(&catalog.0, &selected.vehicle_id);
+    let can_buy_curr = economy.profile.can_buy(&catalog.0, &selected.vehicle_id);
+
+    let mut trigger_primary = keys.just_pressed(KeyCode::Enter);
 
     if keys.just_pressed(KeyCode::Tab) {
         selected.view_mode = match selected.view_mode {
@@ -1200,13 +1281,40 @@ fn handle_hangar_ui_interaction(
         };
 
         let (fill, rim) = match style {
-            HangarButtonStyle::BattlePrimary => {
-                if hovered {
-                    (Color::srgb(0.95, 0.37, 0.16), Color::srgb(1.0, 0.80, 0.48))
-                } else {
-                    (Color::srgb(0.83, 0.29, 0.11), Color::srgb(1.0, 0.64, 0.34))
+            HangarButtonStyle::BattlePrimary => match current_ownership {
+                VehicleOwnership::Owned => {
+                    if hovered {
+                        (Color::srgb(0.95, 0.37, 0.16), Color::srgb(1.0, 0.80, 0.48))
+                    } else {
+                        (Color::srgb(0.83, 0.29, 0.11), Color::srgb(1.0, 0.64, 0.34))
+                    }
                 }
-            }
+                VehicleOwnership::Researched => {
+                    if can_buy_curr {
+                        if hovered {
+                            (Color::srgb(0.82, 0.62, 0.14), Color::srgb(1.0, 0.90, 0.48))
+                        } else {
+                            (Color::srgb(0.66, 0.48, 0.10), Color::srgb(0.96, 0.80, 0.34))
+                        }
+                    } else {
+                        (Color::srgb(0.28, 0.24, 0.16), Color::srgb(0.56, 0.48, 0.30))
+                    }
+                }
+                VehicleOwnership::Researchable => {
+                    if can_research_curr {
+                        if hovered {
+                            (Color::srgb(0.14, 0.56, 0.76), Color::srgb(0.58, 0.94, 1.0))
+                        } else {
+                            (Color::srgb(0.10, 0.42, 0.60), Color::srgb(0.36, 0.82, 0.98))
+                        }
+                    } else {
+                        (Color::srgb(0.15, 0.22, 0.28), Color::srgb(0.34, 0.48, 0.58))
+                    }
+                }
+                VehicleOwnership::Locked => {
+                    (Color::srgb(0.16, 0.18, 0.21), Color::srgb(0.36, 0.40, 0.46))
+                }
+            },
             HangarButtonStyle::SecondaryCyan => {
                 if hovered {
                     (Color::srgb(0.16, 0.54, 0.72), Color::srgb(0.56, 0.92, 1.0))
@@ -1255,21 +1363,45 @@ fn handle_hangar_ui_interaction(
                 }
             }
             HangarButtonStyle::VehicleCard => {
+                let slot_state = if let HangarAction::SelectTierSlot(t) = *action {
+                    catalog
+                        .0
+                        .by_nation_and_tier(selected.nation, t)
+                        .map_or(VehicleOwnership::Locked, |v| {
+                            economy.profile.ownership_state(&catalog.0, &v.id)
+                        })
+                } else {
+                    VehicleOwnership::Locked
+                };
                 if is_active {
                     (
-                        Color::srgba(0.22, 0.19, 0.14, 0.96),
-                        Color::srgb(0.96, 0.60, 0.20),
+                        Color::srgba(0.24, 0.20, 0.13, 0.96),
+                        Color::srgb(0.98, 0.66, 0.22),
                     )
                 } else if hovered {
                     (
-                        Color::srgba(0.15, 0.20, 0.27, 0.95),
+                        Color::srgba(0.15, 0.21, 0.28, 0.95),
                         Color::srgb(0.48, 0.78, 0.96),
                     )
                 } else {
-                    (
-                        Color::srgba(0.09, 0.12, 0.16, 0.92),
-                        Color::srgba(0.34, 0.42, 0.50, 0.58),
-                    )
+                    match slot_state {
+                        VehicleOwnership::Owned => (
+                            Color::srgba(0.09, 0.16, 0.13, 0.94),
+                            Color::srgba(0.30, 0.68, 0.42, 0.68),
+                        ),
+                        VehicleOwnership::Researched => (
+                            Color::srgba(0.16, 0.14, 0.08, 0.94),
+                            Color::srgba(0.86, 0.70, 0.28, 0.72),
+                        ),
+                        VehicleOwnership::Researchable => (
+                            Color::srgba(0.08, 0.13, 0.18, 0.94),
+                            Color::srgba(0.34, 0.64, 0.82, 0.68),
+                        ),
+                        VehicleOwnership::Locked => (
+                            Color::srgba(0.08, 0.09, 0.12, 0.90),
+                            Color::srgba(0.28, 0.32, 0.38, 0.48),
+                        ),
+                    }
                 }
             }
         };
@@ -1281,7 +1413,7 @@ fn handle_hangar_ui_interaction(
     if let Some(action) = pending_action {
         match action {
             HangarAction::EnterBattle => {
-                trigger_battle = true;
+                trigger_primary = true;
             }
             HangarAction::SetViewMode(mode) => {
                 selected.view_mode = mode;
@@ -1312,19 +1444,69 @@ fn handle_hangar_ui_interaction(
         }
     }
 
-    if trigger_battle {
-        sim.0.configure_battle_on_map(
-            selected.map_id,
-            &catalog.0,
-            &selected.vehicle_id,
-            6,
-        );
-        next_state.set(AppState::InBattle);
+    if trigger_primary {
+        let vid = selected.vehicle_id.clone();
+        let spec_name = current_spec.name.to_uppercase();
+        let spec_tier = current_spec.tier;
+        let spec_nation = current_spec.nation;
+        let cost = economy_cost_for_tier(spec_tier);
+        match economy.profile.ownership_state(&catalog.0, &vid) {
+            VehicleOwnership::Owned => {
+                sim.0
+                    .configure_battle_on_map(selected.map_id, &catalog.0, &vid, 6);
+                next_state.set(AppState::InBattle);
+            }
+            VehicleOwnership::Researched => match economy.profile.buy_vehicle(&catalog.0, &vid) {
+                Ok(spent) => {
+                    economy.status_notice =
+                        format!("PURCHASED {} (-{} CR) | READY FOR BATTLE!", spec_name, spent);
+                    economy.save_to_disk();
+                }
+                Err(_) => {
+                    let missing = (cost.cr_cost - economy.profile.credits).max(0);
+                    economy.status_notice =
+                        format!("NEED {} MORE CR TO BUY {}", missing, spec_name);
+                }
+            },
+            VehicleOwnership::Researchable => {
+                match economy.profile.research_vehicle(&catalog.0, &vid) {
+                    Ok(spent) => {
+                        economy.status_notice = format!(
+                            "RESEARCHED {} (-{} {} RP) | BUY FOR {} CR",
+                            spec_name,
+                            spent,
+                            spec_nation.short_tag(),
+                            cost.cr_cost,
+                        );
+                        economy.save_to_disk();
+                    }
+                    Err(_) => {
+                        let missing = cost
+                            .rp_cost
+                            .saturating_sub(economy.profile.rp_for(spec_nation));
+                        economy.status_notice = format!(
+                            "NEED {} MORE {} RP TO RESEARCH {}",
+                            missing,
+                            spec_nation.short_tag(),
+                            spec_name,
+                        );
+                    }
+                }
+            }
+            VehicleOwnership::Locked => {
+                economy.status_notice = format!(
+                    "LOCKED: OWN {} TIER {} FIRST",
+                    spec_nation.short_tag(),
+                    tier_roman(spec_tier.saturating_sub(1)),
+                );
+            }
+        }
     }
 }
 
 fn sync_hangar_ui_content(
     catalog: Res<CatalogResource>,
+    economy: Res<EconomyResource>,
     selected: Res<SelectedVehicle>,
     mut layer_q: Query<(&HangarLayer, &mut Node)>,
     mut text_q: Query<(&HangarDynamicText, &mut Text, &mut TextColor)>,
@@ -1342,16 +1524,46 @@ fn sync_hangar_ui_content(
         .by_id(&selected.vehicle_id)
         .unwrap_or_else(|| catalog.0.default_vehicle());
     let accent = nation_accent_color(spec.nation);
+    let sel_ownership = economy.profile.ownership_state(&catalog.0, &spec.id);
+    let sel_cost = economy_cost_for_tier(spec.tier);
+    let nation_rp = economy.profile.rp_for(selected.nation);
 
     for (slot, mut text, mut color) in &mut text_q {
         match *slot {
+            HangarDynamicText::PrimaryActionLabel => match sel_ownership {
+                VehicleOwnership::Owned => {
+                    text.0 = "BATTLE!".to_string();
+                    color.0 = Color::WHITE;
+                }
+                VehicleOwnership::Researched => {
+                    text.0 = format!("BUY  {} CR", sel_cost.cr_cost);
+                    color.0 = if economy.profile.credits >= sel_cost.cr_cost {
+                        Color::WHITE
+                    } else {
+                        Color::srgb(0.86, 0.76, 0.56)
+                    };
+                }
+                VehicleOwnership::Researchable => {
+                    text.0 = format!("RESEARCH  {} RP", sel_cost.rp_cost);
+                    color.0 = if economy.profile.rp_for(spec.nation) >= sel_cost.rp_cost {
+                        Color::WHITE
+                    } else {
+                        Color::srgb(0.72, 0.82, 0.90)
+                    };
+                }
+                VehicleOwnership::Locked => {
+                    text.0 = format!("LOCKED (TIER {})", tier_roman(spec.tier.saturating_sub(1)));
+                    color.0 = Color::srgb(0.70, 0.74, 0.78);
+                }
+            },
             HangarDynamicText::TopVehicleBanner => {
                 text.0 = format!(
-                    "{}  |  TIER {}  |  {}  |  {}",
+                    "{}  |  TIER {}  |  {}  |  {}  [{}]",
                     spec.nation.label(),
                     tier_roman(spec.tier),
                     spec.name.to_uppercase(),
                     spec.class.label().to_uppercase(),
+                    sel_ownership.badge_label(),
                 );
                 color.0 = Color::srgb(0.96, 0.94, 0.88);
             }
@@ -1369,6 +1581,20 @@ fn sync_hangar_ui_content(
                     selected.map_id.biome_tag(),
                 );
             }
+            HangarDynamicText::EconomyNotice => {
+                text.0 = economy.status_notice.clone();
+            }
+            HangarDynamicText::WalletSummary => {
+                text.0 = format!(
+                    "CR: {}  |  {} RP: {}\nBTL {} | WIN {} | KILLS {}",
+                    economy.profile.credits,
+                    selected.nation.short_tag(),
+                    nation_rp,
+                    economy.profile.battles_played,
+                    economy.profile.victories,
+                    economy.profile.total_kills,
+                );
+            }
             HangarDynamicText::SpecsTitle | HangarDynamicText::TechSpecTitle => {
                 text.0 = format!("{}  {}", tier_roman(spec.tier), spec.name);
                 color.0 = accent;
@@ -1380,7 +1606,15 @@ fn sync_hangar_ui_content(
                 text.0 = format_protection(spec);
             }
             HangarDynamicText::SpecsMobility => {
-                text.0 = format_mobility(spec);
+                let econ_line = if sel_cost.repair_cr == 0 {
+                    "Economy: FREE TIER I RESERVE (0 CR repair)".to_string()
+                } else {
+                    format!(
+                        "Economy: {} RP | {} CR | Repair {} CR",
+                        sel_cost.rp_cost, sel_cost.cr_cost, sel_cost.repair_cr
+                    )
+                };
+                text.0 = format!("{}\n{}", format_mobility(spec), econ_line);
             }
             HangarDynamicText::TechTreeHeader => {
                 text.0 = format!(
@@ -1390,10 +1624,23 @@ fn sync_hangar_ui_content(
                 color.0 = nation_accent_color(selected.nation);
             }
             HangarDynamicText::TechSpecBody => {
+                let econ_line = if sel_cost.repair_cr == 0 {
+                    "FREE RESERVE (0 RP / 0 CR / 0 CR repair)".to_string()
+                } else {
+                    format!(
+                        "Status: {}\nResearch: {} {} RP | Buy: {} CR\nMax Repair: {} CR",
+                        sel_ownership.badge_label(),
+                        sel_cost.rp_cost,
+                        spec.nation.short_tag(),
+                        sel_cost.cr_cost,
+                        sel_cost.repair_cr,
+                    )
+                };
                 text.0 = format!(
-                    "{}  |  {}\n\n-- FIREPOWER --\n{}\n\n-- PROTECTION --\n{}\n\n-- MOBILITY & CREW --\n{}",
+                    "{}  |  {}\n{}\n\n-- FIREPOWER --\n{}\n\n-- PROTECTION --\n{}\n\n-- MOBILITY & CREW --\n{}",
                     spec.nation.label(),
                     spec.class.label(),
+                    econ_line,
                     format_firepower(spec),
                     format_protection(spec),
                     format_mobility(spec),
@@ -1404,8 +1651,10 @@ fn sync_hangar_ui_content(
                     text.0 = format!("{}  {}", tier_roman(tier), v.name);
                     color.0 = if v.id == spec.id {
                         Color::srgb(1.0, 0.86, 0.45)
+                    } else if economy.profile.is_owned(&v.id) {
+                        Color::srgb(0.84, 0.98, 0.86)
                     } else {
-                        Color::WHITE
+                        Color::srgb(0.76, 0.80, 0.84)
                     };
                 }
             }
@@ -1413,45 +1662,63 @@ fn sync_hangar_ui_content(
                 if let Some(v) = catalog.0.by_nation_and_tier(selected.nation, tier) {
                     let loadout = v.ammo_loadout();
                     let primary = loadout.first().unwrap_or(&v.shell);
+                    let cost = economy_cost_for_tier(tier);
+                    let status_tag = match economy.profile.ownership_state(&catalog.0, &v.id) {
+                        VehicleOwnership::Owned => "OWNED".to_string(),
+                        VehicleOwnership::Researched => format!("BUY {} CR", cost.cr_cost),
+                        VehicleOwnership::Researchable => format!("RES {} RP", cost.rp_cost),
+                        VehicleOwnership::Locked => "LOCKED".to_string(),
+                    };
                     text.0 = format!(
-                        "{} | {:.0}mm {} ({:.0}mm)",
+                        "{} | {:.0}mm {} | {}",
                         v.class.short_label(),
                         primary.caliber_mm,
                         primary.kind.short_label(),
-                        primary.penetration_0m_mm,
+                        status_tag,
                     );
                 }
             }
             HangarDynamicText::TechCardTitle(tier) => {
                 if let Some(v) = catalog.0.by_nation_and_tier(selected.nation, tier) {
-                    text.0 = format!("TIER {}  [{}]\n{}", tier_roman(tier), v.class.short_label(), v.name);
+                    text.0 = format!(
+                        "TIER {}  [{}]\n{}",
+                        tier_roman(tier),
+                        v.class.short_label(),
+                        v.name
+                    );
                     color.0 = if v.id == spec.id {
                         Color::srgb(1.0, 0.86, 0.45)
+                    } else if economy.profile.is_owned(&v.id) {
+                        Color::srgb(0.84, 0.98, 0.86)
                     } else {
-                        Color::WHITE
+                        Color::srgb(0.82, 0.86, 0.90)
                     };
                 }
             }
             HangarDynamicText::TechCardSub(tier) => {
                 if let Some(v) = catalog.0.by_nation_and_tier(selected.nation, tier) {
-                    let role_note = if v.turret_yaw_limit_deg.is_some() {
-                        "Casemate"
-                    } else if v.armor.pike_nose {
-                        "Pike Nose"
-                    } else {
-                        v.class.label()
-                    };
                     let loadout = v.ammo_loadout();
                     let primary = loadout.first().unwrap_or(&v.shell);
+                    let cost = economy_cost_for_tier(tier);
+                    let econ_tag = match economy.profile.ownership_state(&catalog.0, &v.id) {
+                        VehicleOwnership::Owned => "OWNED [READY]".to_string(),
+                        VehicleOwnership::Researched => format!("BUY: {} CR", cost.cr_cost),
+                        VehicleOwnership::Researchable => {
+                            format!("RESEARCH: {} RP | {} CR", cost.rp_cost, cost.cr_cost)
+                        }
+                        VehicleOwnership::Locked => {
+                            format!("LOCKED ({} RP / {} CR)", cost.rp_cost, cost.cr_cost)
+                        }
+                    };
                     text.0 = format!(
-                        "Gun: {}\nPen: {:.0}mm {} | Reload {:.1}s\nUFP: {:.0}mm @{:.0} deg | {}",
+                        "Gun: {}\nPen: {:.0}mm {} | Reload {:.1}s\nUFP: {:.0}mm @{:.0} deg\n{}",
                         v.gun_name,
                         primary.penetration_0m_mm,
                         primary.kind.short_label(),
                         v.reload_time,
                         v.armor.ufp_mm,
                         v.armor.ufp_slope_deg,
-                        role_note,
+                        econ_tag,
                     );
                 }
             }
