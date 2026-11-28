@@ -685,6 +685,94 @@ pub fn draw_cupola(c: &mut TankCanvas, p: &TankPalette, cx: f32, cz: f32, y_base
     c.fill_ellipse_y(cx, cz, (r - 0.5).max(0.8), (r - 0.5).max(0.8), y_base + h, y_base + h, p.main);
 }
 
+/// Draws a low-profile `0.05 m` super-resolution cylindrical commander cupola directly onto
+/// an assembled/refined `VoxelModel`.
+///
+/// - `(cx_lo, cz_lo, y_base_lo)`: position in base `0.10 m` `TankCanvas` coordinates
+///   (`y_base_lo` is the first empty `0.10 m` layer directly above the roof).
+/// - `wall_h_micro`: dark armored drum wall height in `0.05 m` voxels (`1` -> `0.10 m` total
+///   height with `0.05 m` hatch lid; `2` -> `0.15 m` total height).
+/// - `r_micro`: outer cupola radius in `0.05 m` voxels.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_micro_cupola(
+    m: &mut VoxelModel,
+    p: &TankPalette,
+    cx_lo: f32,
+    cz_lo: f32,
+    y_base_lo: i32,
+    wall_h_micro: i32,
+    r_micro: f32,
+) {
+    let wall_h = wall_h_micro.max(1);
+    let cx = m.pivot.x + cx_lo * 2.0;
+    let cz = m.pivot.z + cz_lo * 2.0;
+    let y0 = y_base_lo * 2;
+    let slit_y = y0 + wall_h - 1;
+    let lid_y = y0 + wall_h;
+
+    let ix0 = (cx - r_micro - 1.0).floor() as i32;
+    let ix1 = (cx + r_micro + 1.0).ceil() as i32;
+    let iz0 = (cz - r_micro - 1.0).floor() as i32;
+    let iz1 = (cz + r_micro + 1.0).ceil() as i32;
+    let r2 = (r_micro * r_micro).max(0.5);
+    let lid_r = (r_micro - 0.85).max(1.2);
+    let lid_r2 = lid_r * lid_r;
+
+    let inside = |x: i32, z: i32| -> bool {
+        let dx = (x as f32 + 0.5) - cx;
+        let dz = (z as f32 + 0.5) - cz;
+        dx * dx + dz * dz <= r2
+    };
+
+    // 1. Dark armored cupola drum wall
+    for y in y0..=slit_y {
+        for z in iz0..=iz1 {
+            for x in ix0..=ix1 {
+                if inside(x, z) {
+                    m.set(IVec3::new(x, y, z), p.dark);
+                }
+            }
+        }
+    }
+
+    // 2. Crisp 0.05 m vision ports flush on the outer rim of the top wall layer
+    for z in iz0..=iz1 {
+        for x in ix0..=ix1 {
+            if !inside(x, z) {
+                continue;
+            }
+            let dx = (x as f32 + 0.5) - cx;
+            let dz = (z as f32 + 0.5) - cz;
+            if dx.abs() <= 0.6 && dz < 0.0 && !inside(x, z - 1) {
+                let mat = if dx < 0.0 { VoxelId::OPTIC_GLINT } else { p.optic };
+                m.set(IVec3::new(x, slit_y, z), mat);
+            } else if dx.abs() <= 0.6 && dz > 0.0 && !inside(x, z + 1) {
+                m.set(IVec3::new(x, slit_y, z), p.black);
+            } else if dz.abs() <= 0.6 && dx < 0.0 && !inside(x - 1, z) {
+                m.set(IVec3::new(x, slit_y, z), p.black);
+            } else if dz.abs() <= 0.6 && dx > 0.0 && !inside(x + 1, z) {
+                m.set(IVec3::new(x, slit_y, z), p.black);
+            } else if r_micro >= 3.5
+                && (dx.abs() - dz.abs()).abs() <= 0.6
+                && (!inside(x + dx.signum() as i32, z) || !inside(x, z + dz.signum() as i32))
+            {
+                m.set(IVec3::new(x, slit_y, z), p.black);
+            }
+        }
+    }
+
+    // 3. Thin 0.05 m inset armored hatch lid on top
+    for z in iz0..=iz1 {
+        for x in ix0..=ix1 {
+            let dx = (x as f32 + 0.5) - cx;
+            let dz = (z as f32 + 0.5) - cz;
+            if dx * dx + dz * dz <= lid_r2 {
+                m.set(IVec3::new(x, lid_y, z), p.main);
+            }
+        }
+    }
+}
+
 /// Draws a crisp front headlight housing with bright warm lens facing `-Z`.
 pub fn draw_headlight(c: &mut TankCanvas, p: &TankPalette, x: i32, y: i32, z: i32) {
     c.set(x, y, z, p.trim);

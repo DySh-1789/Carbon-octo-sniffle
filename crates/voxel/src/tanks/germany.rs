@@ -17,7 +17,7 @@ use crate::model::{MuzzleBrakeStyle, TankVoxelModels};
 
 use super::{
     TankCanvas, TankPalette, assemble_tank, build_detailed_barrel, build_running_gear,
-    draw_balkenkreuz_flanks, draw_bow_mg, draw_cupola, draw_engine_grilles, draw_headlight,
+    draw_balkenkreuz_flanks, draw_bow_mg, draw_engine_grilles, draw_headlight, draw_micro_cupola,
 };
 
 /// Dispatches a German catalog `vehicle_id` to its bespoke `0.10 m` voxel sculptor.
@@ -439,8 +439,6 @@ fn build_pz2c() -> TankVoxelModels {
     // Turret side vision slits & pistol ports
     turret.set_sym(5, 3, -1, p.optic);
     turret.set_sym(5, 3, 2, p.trim);
-    // Compact early-war commander hatch/cupola on turret rear roof
-    draw_cupola(&mut turret, &p, 0.0, 2.0, 6, 1, 1.5);
 
     // Armored front mantlet housing side-by-side 20mm KwK 30 + coaxial MG34
     turret.fill(-3, 1, -7, 3, 4, -6, p.dark);
@@ -453,14 +451,17 @@ fn build_pz2c() -> TankVoxelModels {
     // 20mm KwK 30 barrel: len 18, thin, no muzzle brake, offset to x = -1 alongside MG34
     let barrel = build_detailed_barrel(&p, 18, false, 3, MuzzleBrakeStyle::None);
 
-    assemble_tank(
+    let mut models = assemble_tank(
         hull,
         turret,
         barrel,
         Vec3::new(-1.5, 13.0, -3.0),
         Vec3::new(-1.0, 2.0, -7.0),
         18.0,
-    )
+    );
+    // Low-profile early-war commander hatch/cupola on turret rear roof (0.10 m tall)
+    draw_micro_cupola(&mut models.turret, &p, 0.0, 2.0, 6, 1, 2.6);
+    models
 }
 
 // ============================================================================
@@ -552,20 +553,20 @@ fn build_pz3j() -> TankVoxelModels {
     // Rear Rommelkiste stowage box
     draw_rommelkiste(&mut turret, &p, 5, 1, 5, 10, 14);
 
-    // Compact cylindrical commander drum cupola
-    draw_cupola(&mut turret, &p, 0.0, 4.0, 7, 2, 2.0);
-
     // 50mm KwK 38 L/42 barrel: len 22, thin, no muzzle brake
     let barrel = build_detailed_barrel(&p, 22, false, 4, MuzzleBrakeStyle::None);
 
-    assemble_tank(
+    let mut models = assemble_tank(
         hull,
         turret,
         barrel,
         Vec3::new(0.0, 14.0, -3.0),
         Vec3::new(0.0, 3.0, -10.0),
         22.0,
-    )
+    );
+    // Low cylindrical commander drum cupola (0.15 m tall)
+    draw_micro_cupola(&mut models.turret, &p, 0.0, 4.0, 7, 2, 3.6);
+    models
 }
 
 // ============================================================================
@@ -663,20 +664,20 @@ fn build_pz4_f2() -> TankVoxelModels {
     // Oversized Pz.IV rear Rommelkiste stowage bin spanning nearly full turret rear
     draw_rommelkiste(&mut turret, &p, 7, 1, 5, 10, 16);
 
-    // Compact cylindrical commander drum cupola
-    draw_cupola(&mut turret, &p, 0.0, 4.0, 7, 2, 2.0);
-
     // Unmistakable long 75mm KwK 40 L/43 barrel: len 34, thin, DoubleBaffle muzzle brake
     let barrel = build_detailed_barrel(&p, 34, false, 4, MuzzleBrakeStyle::DoubleBaffle);
 
-    assemble_tank(
+    let mut models = assemble_tank(
         hull,
         turret,
         barrel,
         Vec3::new(0.0, 14.0, -3.5),
         Vec3::new(0.0, 3.0, -10.0),
         34.0,
-    )
+    );
+    // Low cylindrical commander drum cupola (0.15 m tall)
+    draw_micro_cupola(&mut models.turret, &p, 0.0, 4.0, 7, 2, 3.8);
+    models
 }
 
 // ============================================================================
@@ -737,9 +738,6 @@ fn build_stug3g() -> TankVoxelModels {
     hull.fill(-9, 11, -15, -5, 13, -13, p.main);
     draw_driver_visor(&mut hull, &p, -7, 12, -15, 1);
 
-    // Commander's periscope cupola on LEFT roof (low profile StuG III G cupola)
-    draw_cupola(&mut hull, &p, -5.5, 1.5, 17, 1, 1.8);
-
     // Iconic FOLDING MG34 ARMORED SHIELD + loader's hatch on RIGHT roof
     hull.fill(2, 17, 2, 7, 17, 6, p.dark); // Loader hatch frame
     hull.fill(2, 17, -1, 7, 20, -1, p.main); // Angled armored MG shield
@@ -775,14 +773,17 @@ fn build_stug3g() -> TankVoxelModels {
     // Long 75mm StuK 40 L/48 barrel: len 36, thin, DoubleBaffle muzzle brake
     let barrel = build_detailed_barrel(&p, 36, false, 4, MuzzleBrakeStyle::DoubleBaffle);
 
-    assemble_tank(
+    let mut models = assemble_tank(
         hull,
         turret,
         barrel,
         Vec3::new(0.0, 11.0, -11.0),
         Vec3::new(0.0, 2.0, -5.0),
         36.0,
-    )
+    );
+    // Commander's low-profile periscope cupola on LEFT roof (0.10 m tall)
+    draw_micro_cupola(&mut models.hull, &p, -5.5, 1.5, 17, 1, 3.2);
+    models
 }
 
 // ============================================================================
@@ -891,21 +892,23 @@ fn build_tiger_h1() -> TankVoxelModels {
     // Rear curved turret stowage bin (Rommelkiste)
     draw_rommelkiste(&mut turret, &p, 7, 1, 6, 11, 15);
 
-    // Compact cylindrical Tiger H1 drum cupola on LEFT + loader hatch on right
-    draw_cupola(&mut turret, &p, -6.0, 3.0, 8, 2, 2.2);
+    // Loader hatch on right turret roof
     turret.fill_ellipse_y(5.0, 2.0, 2.2, 2.2, 8, 8, p.dark);
 
     // Thick 88mm KwK 36 L/56 barrel: len 42, thick, DoubleBaffle muzzle brake
     let barrel = build_detailed_barrel(&p, 42, true, 6, MuzzleBrakeStyle::DoubleBaffle);
 
-    assemble_tank(
+    let mut models = assemble_tank(
         hull,
         turret,
         barrel,
         Vec3::new(0.0, 16.0, -3.0),
         Vec3::new(0.0, 4.0, -12.0),
         42.0,
-    )
+    );
+    // Low cylindrical Tiger H1 drum cupola on LEFT (0.15 m tall)
+    draw_micro_cupola(&mut models.turret, &p, -6.0, 3.0, 8, 2, 4.0);
+    models
 }
 
 // ============================================================================
@@ -991,22 +994,23 @@ fn build_panther_a() -> TankVoxelModels {
     turret.set(-2, 5, -13, p.optic);
     turret.set(3, 4, -13, p.black);
 
-    // Compact cylindrical cast Panther Ausf. A commander cupola on LEFT
-    draw_cupola(&mut turret, &p, -4.5, 4.5, 9, 2, 2.0);
     // Circular rear turret escape hatch on back wall
     turret.fill_cyl_z(0.0, 4.0, 11, 12, 2.2, p.dark);
 
     // Super-long slender 75mm KwK 42 L/70 barrel: len 48, thin, DoubleBaffle muzzle brake
     let barrel = build_detailed_barrel(&p, 48, false, 5, MuzzleBrakeStyle::DoubleBaffle);
 
-    assemble_tank(
+    let mut models = assemble_tank(
         hull,
         turret,
         barrel,
         Vec3::new(0.0, 17.0, -3.5),
         Vec3::new(0.0, 4.0, -13.0),
         48.0,
-    )
+    );
+    // Low cylindrical cast Panther Ausf. A commander cupola on LEFT (0.15 m tall)
+    draw_micro_cupola(&mut models.turret, &p, -4.5, 4.5, 9, 2, 3.6);
+    models
 }
 
 // ============================================================================
@@ -1112,23 +1116,24 @@ fn build_tiger2_h() -> TankVoxelModels {
         }
     }
 
-    // Sleek low-profile Tiger II commander cupola on LEFT + loader hatch on right
-    draw_cupola(&mut turret, &p, -4.5, 2.5, 9, 1, 2.0);
+    // Loader hatch on right + rear bustle escape hatch
     turret.fill_ellipse_y(4.5, 1.5, 2.2, 2.2, 9, 9, p.dark);
-    // Rear bustle escape hatch
     turret.fill(-3, 2, 18, 3, 6, 19, p.dark);
 
     // Mammoth 88mm KwK 43 L/71 barrel: len 54, thick, DoubleBaffle muzzle brake
     let barrel = build_detailed_barrel(&p, 54, true, 7, MuzzleBrakeStyle::DoubleBaffle);
 
-    assemble_tank(
+    let mut models = assemble_tank(
         hull,
         turret,
         barrel,
         Vec3::new(0.0, 18.0, -3.5),
         Vec3::new(0.0, 4.5, -20.0),
         54.0,
-    )
+    );
+    // Sleek low-profile Tiger II commander cupola on LEFT (0.10 m tall)
+    draw_micro_cupola(&mut models.turret, &p, -4.5, 2.5, 9, 1, 3.6);
+    models
 }
 
 // ============================================================================
@@ -1204,9 +1209,6 @@ fn build_jagdtiger() -> TankVoxelModels {
         }
     }
 
-    // Twin roof periscope hatches + commander/loader hatches + gunner sight hood on casemate roof
-    draw_cupola(&mut hull, &p, -5.5, 3.5, 28, 1, 1.8);
-    draw_cupola(&mut hull, &p, 5.5, 3.5, 28, 1, 1.8);
     // Front gunner telescopic periscope hood
     hull.fill(-5, 28, -13, -3, 29, -11, p.dark);
     hull.set(-4, 29, -13, p.optic);
@@ -1239,14 +1241,18 @@ fn build_jagdtiger() -> TankVoxelModels {
     // COLOSSAL thick 128mm PaK 44 L/55 barrel: len 58, thick, NO muzzle brake (historically authentic!)
     let barrel = build_detailed_barrel(&p, 58, true, 8, MuzzleBrakeStyle::None);
 
-    assemble_tank(
+    let mut models = assemble_tank(
         hull,
         turret,
         barrel,
         Vec3::new(0.0, 19.0, -16.0),
         Vec3::new(0.0, 3.5, -10.0),
         58.0,
-    )
+    );
+    // Twin low-profile roof hatches/cupolas on casemate roof (0.10 m tall)
+    draw_micro_cupola(&mut models.hull, &p, -5.5, 3.5, 28, 1, 3.2);
+    draw_micro_cupola(&mut models.hull, &p, 5.5, 3.5, 28, 1, 3.2);
+    models
 }
 
 #[cfg(test)]
@@ -1298,5 +1304,44 @@ mod tests {
         }
 
         assert!(build_germany_vehicle("unknown_tank").is_none());
+    }
+
+    #[test]
+    fn german_cupolas_stay_low_profile() {
+        use glam::IVec3;
+
+        // (vehicle_id, expected roof top micro-y, max allowed cupola top micro-y)
+        let checks = [
+            ("de_pz2c", 11, 13),      // 0.60m turret, 0.10m cupola
+            ("de_pz3j", 13, 16),      // 0.70m turret, 0.15m cupola
+            ("de_pz4_f2", 13, 16),    // 0.70m turret, 0.15m cupola
+            ("de_tiger_h1", 15, 18),  // 0.80m turret, 0.15m cupola
+            ("de_panther_a", 17, 20), // 0.90m turret, 0.15m cupola
+            ("de_tiger2_h", 17, 19),  // 0.90m turret, 0.10m cupola
+        ];
+
+        for (id, roof_y, expected_top_y) in checks {
+            let models = build_germany_vehicle(id).unwrap();
+            let t = &models.turret;
+            let mut max_y = 0;
+            for y in 0..t.size.y as i32 {
+                for z in 0..t.size.z as i32 {
+                    for x in 0..t.size.x as i32 {
+                        if !t.get(IVec3::new(x, y, z)).is_air() {
+                            max_y = max_y.max(y);
+                        }
+                    }
+                }
+            }
+            assert_eq!(
+                max_y, expected_top_y,
+                "{id}: expected cupola top y={expected_top_y} (roof={roof_y}), got {max_y}"
+            );
+            assert!(
+                max_y - roof_y <= 3,
+                "{id}: cupola protrudes {} micro-voxels (> 0.15 m)",
+                max_y - roof_y
+            );
+        }
     }
 }
