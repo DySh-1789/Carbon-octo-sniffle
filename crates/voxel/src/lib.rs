@@ -219,4 +219,28 @@ mod tests {
         assert!(nearest.contains(&IVec3::ZERO));
         assert!(nearest.contains(&IVec3::new(2, 0, 0)));
     }
+
+    #[test]
+    fn explosion_destruction_and_restore_roundtrips_cleanly() {
+        let mut world = VoxelWorld::new(WORLD_VOXEL_SIZE);
+        world.bounds_min = IVec3::new(-16, 0, -16);
+        world.bounds_max = IVec3::new(16, 12, 16);
+        world.fill_box(IVec3::new(-16, 0, -16), IVec3::new(16, 0, 16), VoxelId::ROCK);
+        world.fill_box(IVec3::new(-16, 1, -16), IVec3::new(16, 1, 16), VoxelId::GRASS);
+        world.fill_box(IVec3::new(-4, 2, -2), IVec3::new(4, 6, -1), VoxelId::BRICK);
+        let _ = world.take_dirty_chunks(256);
+
+        let res = world.carve_explosion(Vec3::new(0.0, 1.5, -0.75), 3.0, 8.0);
+        assert!(res.destroyed_voxels >= 10);
+        assert!(world.destroyed_voxel_backup_count() >= res.destroyed_voxels as usize);
+        assert_eq!(world.get_voxel(IVec3::new(0, 3, -1)), VoxelId::AIR);
+
+        let _ = world.take_dirty_chunks(256);
+        let restored = world.restore_destructible_voxels();
+        assert!(restored >= res.destroyed_voxels as usize);
+        assert_eq!(world.destroyed_voxel_backup_count(), 0);
+        assert_eq!(world.get_voxel(IVec3::new(0, 3, -1)), VoxelId::BRICK);
+        assert_eq!(world.get_voxel(IVec3::new(0, 1, -1)), VoxelId::GRASS);
+        assert!(world.dirty_chunk_count() > 0);
+    }
 }

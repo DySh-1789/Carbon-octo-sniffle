@@ -572,15 +572,33 @@ impl BotBrain {
         self.aim_settle = (self.aim_settle - dt / 2.2).max(speed_ratio * 0.7).clamp(0.0, 1.0);
 
         let mut fire = false;
+        let mut select_shell = None;
         let mut target_dist = f32::MAX;
         let aim_point = if let (Some(t), true) = (target, target_visible) {
+            // Smart ammunition selection: switch to HE for open-top/thin-roof overpressure targets,
+            // otherwise keep primary kinetic AP/APCBC/APHEBC chambered.
+            let weak_roof = t.state.config.armor.hull_roof_mm.min(t.state.config.armor.turret_roof_mm);
+            let want_slot = if weak_roof <= 12.0 {
+                st.config
+                    .ammo_rack
+                    .iter()
+                    .position(|s| s.is_he() && s.he_pen_mm >= weak_roof)
+                    .unwrap_or(0)
+            } else {
+                0
+            };
+            if st.selected_shell_idx != want_slot {
+                select_shell = Some(want_slot);
+            }
+
             let gun = st.gun_world_position();
             let center = t.aim_center();
             let dist = gun.distance(center);
             target_dist = dist;
-            let v0 = st.config.muzzle_velocity.max(1.0);
+            let active_sh = st.active_shell();
+            let v0 = active_sh.muzzle_velocity.max(1.0);
             let mut tof = dist / v0;
-            tof *= 1.0 + 0.5 * st.config.shell_drag * tof;
+            tof *= 1.0 + 0.5 * active_sh.drag_coeff * tof;
             let lead = center + t.velocity() * tof;
             let drop = 0.5 * GRAVITY * tof * tof;
             let spread = dist * (0.015 + 0.025 * self.aim_settle);
@@ -605,6 +623,16 @@ impl BotBrain {
         } else {
             self.idle_aim_point(me, ctx, goal)
         };
+
+        // Tactical FPE & Field Repair decisions
+        let use_fpe = me.damage.on_fire
+            && me.damage.fpe_charges > 0
+            && me.damage.fpe_cooldown <= 0.0
+            && me.damage.fire_elapsed >= 2.1;
+        let toggle_repair = !me.damage.repairing
+            && !me.damage.on_fire
+            && me.damage.has_critical_module_destroyed()
+            && st.forward_speed.abs() < 2.2;
 
         // Driving
         let (throttle, steer);
@@ -631,16 +659,31 @@ impl BotBrain {
                     BotMode::Hold
                 };
                 throttle = 0.0;
-                if target_visible && let Some(lim) = st.config.turret_yaw_limit {
+                if target_visible {
                     let dx = aim_point.x - pos.x;
                     let dz = aim_point.z - pos.z;
-                    let desired_yaw = (-dx).atan2(-dz);
-                    let yaw_err = wrap_angle(desired_yaw - st.hull_yaw);
-                    steer = if yaw_err.abs() > lim * 0.70 {
-                        (yaw_err * 3.0).clamp(-1.0, 1.0)
+                    let target_yaw = (-dx).atan2(-dz);
+                    if let Some(lim) = st.config.turret_yaw_limit {
+                        let yaw_err = wrap_angle(target_yaw - st.hull_yaw);
+                        steer = if yaw_err.abs() > lim * 0.70 {
+                            (yaw_err * 3.0).clamp(-1.0, 1.0)
+                        } else {
+                            0.0
+                        };
+                    } else if engage_hold && !st.config.armor.pike_nose {
+                        // Diamond-angle hull ~26 deg off enemy line of fire to boost effective glacis armor
+                        // (skip pike-nose hulls like IS-3 which are strongest facing straight ahead)
+                        let side = if me.id.0.is_multiple_of(2) { 1.0 } else { -1.0 };
+                        let desired_hull = wrap_angle(target_yaw + side * 26.0f32.to_radians());
+                        let yaw_err = wrap_angle(desired_hull - st.hull_yaw);
+                        steer = if yaw_err.abs() > 0.14 {
+                            (yaw_err * 2.2).clamp(-0.85, 0.85)
+                        } else {
+                            0.0
+                        };
                     } else {
-                        0.0
-                    };
+                        steer = 0.0;
+                    }
                 } else {
                     steer = 0.0;
                 }
@@ -680,7 +723,9 @@ impl BotBrain {
             steer,
             aim_world_point: aim_point,
             fire: fire && me.damage.can_fire(),
-            select_shell: None,
+            select_shell,
+            use_fpe,
+            toggle_repair,
         }
     }
 
@@ -704,7 +749,21 @@ impl BotBrain {
             .enumerate()
             .filter(|(_, z)| !z.secured_by(team))
             .min_by(|a, b| {
-                horiz_dist(pos, a.1.center).total_cmp(&horiz_dist(pos, b.1.center))
+                // Spread bots across uncaptured zones by penalizing zones already crowded by teammates
+                let score = |z: &CaptureZoneState| -> f32 {
+                    let allies_near = ctx
+                        .tanks
+                        .iter()
+                        .filter(|t| {
+                            t.alive
+                                && t.team == team
+                                && t.id != me.id
+                                && horiz_dist(t.state.position, z.center) < 38.0
+                        })
+                        .count();
+                    horiz_dist(pos, z.center) + allies_near as f32 * 48.0
+                };
+                score(a.1).total_cmp(&score(b.1))
             })
             .map(|(i, _)| i);
         self.objective = match best {

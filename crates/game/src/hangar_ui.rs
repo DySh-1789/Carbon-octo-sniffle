@@ -26,6 +26,7 @@ struct HangarOrbitState {
     pitch: f32,
     distance: f32,
     auto_rotate: bool,
+    over_ui: bool,
 }
 
 impl Default for HangarOrbitState {
@@ -35,9 +36,65 @@ impl Default for HangarOrbitState {
             pitch: 0.21,
             distance: 8.8,
             auto_rotate: true,
+            over_ui: false,
         }
     }
 }
+
+/// Panning and click-vs-drag state for the interactive Research Tree canvas.
+#[derive(Resource)]
+struct TechTreePanState {
+    offset: Vec2,
+    target_offset: Vec2,
+    velocity: Vec2,
+    dragging: bool,
+    drag_moved_px: f32,
+    pressed_tier: Option<u8>,
+    pending_click_tier: Option<u8>,
+    needs_center_on_tier: Option<u8>,
+    was_tech_tree: bool,
+}
+
+impl Default for TechTreePanState {
+    fn default() -> Self {
+        Self {
+            offset: Vec2::ZERO,
+            target_offset: Vec2::ZERO,
+            velocity: Vec2::ZERO,
+            dragging: false,
+            drag_moved_px: 0.0,
+            pressed_tier: None,
+            pending_click_tier: None,
+            needs_center_on_tier: Some(1),
+            was_tech_tree: false,
+        }
+    }
+}
+
+/// Outer clipped viewport of the draggable Research Tree.
+#[derive(Component)]
+struct TechTreeViewport;
+
+/// Inner wide progression canvas positioned by `TechTreePanState::offset`.
+#[derive(Component)]
+struct TechTreeCanvas;
+
+/// Marks a vehicle card inside the draggable Research Tree (handled with click-vs-drag gating).
+#[derive(Component, Clone, Copy)]
+struct TechTreeCardNode(u8);
+
+/// Horizontal progression link between Tier `t` and Tier `t + 1`.
+#[derive(Component, Clone, Copy)]
+struct TechTreeConnector(u8);
+
+const TECH_TREE_CARD_W: f32 = 204.0;
+const TECH_TREE_CARD_H: f32 = 164.0;
+const TECH_TREE_STEP_X: f32 = 248.0;
+const TECH_TREE_PAD_X: f32 = 38.0;
+const TECH_TREE_CARD_Y: f32 = 104.0;
+const TECH_TREE_CANVAS_W: f32 = TECH_TREE_PAD_X * 2.0 + TECH_TREE_STEP_X * 7.0 + TECH_TREE_CARD_W;
+const TECH_TREE_CANVAS_H: f32 = 360.0;
+const TECH_TREE_CLICK_MAX_DRAG_PX: f32 = 7.0;
 
 /// Interactive button actions across both the Industrial Hangar and Tech Tree overlays.
 #[derive(Component, Clone, Copy, PartialEq, Eq)]
@@ -48,6 +105,7 @@ enum HangarAction {
     SelectTierSlot(u8),
     PrevMap,
     NextMap,
+    ResetTechTreePan,
 }
 
 /// Visual styling category for an interactive `HangarAction` node.
@@ -90,6 +148,7 @@ pub struct HangarPlugin;
 impl Plugin for HangarPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<HangarOrbitState>()
+            .init_resource::<TechTreePanState>()
             .add_systems(
                 OnEnter(AppState::Hangar),
                 (setup_hangar_scene, setup_hangar_ui, sync_hangar_ui_content).chain(),
@@ -97,9 +156,10 @@ impl Plugin for HangarPlugin {
             .add_systems(
                 Update,
                 (
+                    update_tech_tree_pan,
+                    handle_hangar_ui_interaction,
                     rebuild_showcase_tank_if_dirty,
                     update_hangar_orbit_camera,
-                    handle_hangar_ui_interaction,
                     sync_hangar_ui_content,
                 )
                     .chain()
@@ -358,8 +418,10 @@ fn rebuild_showcase_tank_if_dirty(
         });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn update_hangar_orbit_camera(
     time: Res<Time>,
+    keys: Res<ButtonInput<KeyCode>>,
     selected: Res<SelectedVehicle>,
     mouse_buttons: Res<ButtonInput<MouseButton>>,
     mouse_motion: Res<AccumulatedMouseMotion>,
@@ -371,9 +433,14 @@ fn update_hangar_orbit_camera(
         return;
     };
 
+    if keys.just_pressed(KeyCode::KeyR) {
+        orbit.auto_rotate = true;
+    }
+
     let dragging = selected.view_mode == HangarViewMode::Podium
+        && !orbit.over_ui
         && (mouse_buttons.pressed(MouseButton::Right) || mouse_buttons.pressed(MouseButton::Left));
-    if dragging && mouse_motion.delta.length_squared() > 0.01 {
+    if dragging && mouse_motion.delta.length_squared() > 0.25 {
         orbit.auto_rotate = false;
         orbit.yaw -= mouse_motion.delta.x * 0.0065;
         orbit.pitch = (orbit.pitch + mouse_motion.delta.y * 0.005).clamp(0.08, 0.85);
@@ -743,7 +810,7 @@ fn setup_hangar_ui(
                         margin: UiRect::top(Val::Px(8.0)),
                         ..default()
                     },
-                    Text::new("Drag: Orbit 3D\nScroll: Zoom\nEnter: Battle"),
+                    Text::new("Drag: Orbit | R: Auto\n1-8: Tier | Q/E: Nation\nLeft/Right: Map\nTab: Tree | Enter: Go"),
                     TextFont {
                         font_size: FontSize::Px(10.0),
                         ..default()
@@ -992,26 +1059,26 @@ fn setup_hangar_ui(
                 });
             });
 
-            // 2b. Center Connected 8-Tier Progression Tree (I -> IV and V -> VIII)
+            // 2b. Center Interactive Drag & Click 8-Tier Research Tree
             root.spawn((
                 Node {
                     flex_grow: 1.0,
                     height: Val::Percent(100.0),
-                    padding: UiRect::all(Val::Px(16.0)),
+                    padding: UiRect::all(Val::Px(14.0)),
                     flex_direction: FlexDirection::Column,
-                    justify_content: JustifyContent::Center,
-                    row_gap: Val::Px(18.0),
+                    row_gap: Val::Px(10.0),
                     border: UiRect::all(Val::Px(1.0)),
                     ..default()
                 },
                 BorderColor::all(Color::srgba(0.36, 0.46, 0.56, 0.45)),
-                BackgroundColor(Color::srgba(0.06, 0.09, 0.13, 0.82)),
+                BackgroundColor(Color::srgba(0.06, 0.09, 0.13, 0.86)),
             ))
             .with_children(|tree| {
                 tree.spawn(Node {
                     width: Val::Percent(100.0),
                     justify_content: JustifyContent::SpaceBetween,
                     align_items: AlignItems::Center,
+                    column_gap: Val::Px(10.0),
                     ..default()
                 })
                 .with_children(|hdr| {
@@ -1019,103 +1086,264 @@ fn setup_hangar_ui(
                         HangarDynamicText::TechTreeHeader,
                         Text::new("USA ARMORED FORCES  |  TIERS I - VIII"),
                         TextFont {
-                            font_size: FontSize::Px(16.0),
+                            font_size: FontSize::Px(15.5),
                             ..default()
                         },
                         TextColor(Color::srgb(0.95, 0.84, 0.44)),
                     ));
-                    hdr.spawn((
-                        HangarDynamicText::WalletSummary,
-                        Text::new("CR: 2500 | USA RP: 0"),
-                        TextFont {
-                            font_size: FontSize::Px(11.5),
-                            ..default()
-                        },
-                        TextColor(Color::srgb(0.96, 0.86, 0.50)),
-                    ));
-                });
-
-                tree.spawn((
-                    HangarDynamicText::EconomyNotice,
-                    Text::new("UPDATE 0.1 ECONOMY | FREE TIER I RESERVES READY"),
-                    TextFont {
-                        font_size: FontSize::Px(10.5),
-                        ..default()
-                    },
-                    TextColor(Color::srgb(0.68, 0.88, 0.98)),
-                ));
-
-                for (row_label, tiers) in [
-                    ("EARLY & MID WAR  (TIERS I - IV)", [1u8, 2, 3, 4]),
-                    ("LATE WAR & HEAVY  (TIERS V - VIII)", [5u8, 6, 7, 8]),
-                ] {
-                    tree.spawn((
-                        Text::new(row_label),
-                        TextFont {
-                            font_size: FontSize::Px(11.0),
-                            ..default()
-                        },
-                        TextColor(Color::srgb(0.62, 0.70, 0.80)),
-                    ));
-
-                    tree.spawn(Node {
-                        width: Val::Percent(100.0),
+                    hdr.spawn(Node {
                         align_items: AlignItems::Center,
-                        column_gap: Val::Px(6.0),
+                        column_gap: Val::Px(10.0),
                         ..default()
                     })
-                    .with_children(|row| {
-                        for (idx, tier) in tiers.iter().copied().enumerate() {
-                            row.spawn((
-                                HangarAction::SelectTierSlot(tier),
-                                HangarButtonStyle::VehicleCard,
+                    .with_children(|right| {
+                        right
+                            .spawn((
+                                HangarAction::ResetTechTreePan,
+                                HangarButtonStyle::SecondaryCyan,
                                 Node {
-                                    flex_grow: 1.0,
-                                    flex_basis: Val::Px(0.0),
-                                    height: Val::Px(134.0),
-                                    padding: UiRect::all(Val::Px(10.0)),
-                                    flex_direction: FlexDirection::Column,
-                                    justify_content: JustifyContent::SpaceBetween,
-                                    border: UiRect::all(Val::Px(1.5)),
+                                    padding: UiRect::axes(Val::Px(10.0), Val::Px(5.0)),
+                                    border: UiRect::all(Val::Px(1.0)),
                                     ..default()
                                 },
-                                BorderColor::all(Color::srgba(0.38, 0.48, 0.58, 0.65)),
-                                BackgroundColor(Color::srgba(0.10, 0.14, 0.19, 0.94)),
+                                BorderColor::all(Color::srgb(0.36, 0.82, 0.98)),
+                                BackgroundColor(Color::srgb(0.11, 0.42, 0.58)),
                             ))
-                            .with_children(|card| {
-                                card.spawn((
-                                    HangarDynamicText::TechCardTitle(tier),
-                                    Text::new(format!("TIER {}", tier_roman(tier))),
-                                    TextFont {
-                                        font_size: FontSize::Px(13.0),
-                                        ..default()
-                                    },
-                                    TextColor(Color::WHITE),
-                                ));
-                                card.spawn((
-                                    HangarDynamicText::TechCardSub(tier),
-                                    Text::new(""),
+                            .with_children(|b| {
+                                b.spawn((
+                                    Text::new("CENTER"),
                                     TextFont {
                                         font_size: FontSize::Px(10.5),
                                         ..default()
                                     },
-                                    TextColor(Color::srgb(0.74, 0.80, 0.86)),
+                                    TextColor(Color::WHITE),
                                 ));
                             });
-
-                            if idx < 3 {
-                                row.spawn((
-                                    Node {
-                                        width: Val::Px(16.0),
-                                        height: Val::Px(3.0),
-                                        ..default()
-                                    },
-                                    BackgroundColor(Color::srgba(0.48, 0.64, 0.80, 0.65)),
-                                ));
-                            }
-                        }
+                        right.spawn((
+                            HangarDynamicText::WalletSummary,
+                            Text::new("CR: 2500 | USA RP: 0"),
+                            TextFont {
+                                font_size: FontSize::Px(11.0),
+                                ..default()
+                            },
+                            TextColor(Color::srgb(0.96, 0.86, 0.50)),
+                        ));
                     });
-                }
+                });
+
+                tree.spawn(Node {
+                    width: Val::Percent(100.0),
+                    justify_content: JustifyContent::SpaceBetween,
+                    align_items: AlignItems::Center,
+                    ..default()
+                })
+                .with_children(|sub| {
+                    sub.spawn((
+                        HangarDynamicText::EconomyNotice,
+                        Text::new("UPDATE 0.1 ECONOMY | FREE TIER I RESERVES READY"),
+                        TextFont {
+                            font_size: FontSize::Px(10.5),
+                            ..default()
+                        },
+                        TextColor(Color::srgb(0.68, 0.88, 0.98)),
+                    ));
+                    sub.spawn((
+                        Text::new("DRAG CANVAS TO PAN  |  WHEEL TO SLIDE  |  CLICK CARD TO SELECT / AGAIN TO UNLOCK"),
+                        TextFont {
+                            font_size: FontSize::Px(9.5),
+                            ..default()
+                        },
+                        TextColor(Color::srgb(0.58, 0.68, 0.78)),
+                    ));
+                });
+
+                // Clipped interactive Research Tree viewport
+                tree.spawn((
+                    TechTreeViewport,
+                    Node {
+                        width: Val::Percent(100.0),
+                        flex_grow: 1.0,
+                        overflow: Overflow::clip(),
+                        border: UiRect::all(Val::Px(1.0)),
+                        ..default()
+                    },
+                    BorderColor::all(Color::srgba(0.32, 0.44, 0.56, 0.55)),
+                    BackgroundColor(Color::srgba(0.035, 0.055, 0.085, 0.94)),
+                ))
+                .with_children(|viewport| {
+                    viewport
+                        .spawn((
+                            TechTreeCanvas,
+                            Node {
+                                position_type: PositionType::Absolute,
+                                left: Val::Px(0.0),
+                                top: Val::Px(0.0),
+                                width: Val::Px(TECH_TREE_CANVAS_W),
+                                height: Val::Px(TECH_TREE_CANVAS_H),
+                                ..default()
+                            },
+                        ))
+                        .with_children(|canvas| {
+                            // Subtle Era banner headers across the draggable board
+                            for (era_label, start_tier, span_tiers, accent) in [
+                                (
+                                    "RESERVE & EARLY WAR  (TIERS I - II)",
+                                    1u8,
+                                    2u8,
+                                    Color::srgba(0.28, 0.62, 0.44, 0.24),
+                                ),
+                                (
+                                    "MID WAR ARMOR  (TIERS III - V)",
+                                    3u8,
+                                    3u8,
+                                    Color::srgba(0.26, 0.54, 0.76, 0.24),
+                                ),
+                                (
+                                    "LATE WAR & HEAVY BREAKTHROUGH  (TIERS VI - VIII)",
+                                    6u8,
+                                    3u8,
+                                    Color::srgba(0.84, 0.58, 0.22, 0.24),
+                                ),
+                            ] {
+                                let x0 = TECH_TREE_PAD_X + (start_tier - 1) as f32 * TECH_TREE_STEP_X;
+                                let w = (span_tiers - 1) as f32 * TECH_TREE_STEP_X + TECH_TREE_CARD_W;
+                                canvas
+                                    .spawn((
+                                        Node {
+                                            position_type: PositionType::Absolute,
+                                            left: Val::Px(x0),
+                                            top: Val::Px(18.0),
+                                            width: Val::Px(w),
+                                            height: Val::Px(28.0),
+                                            padding: UiRect::axes(Val::Px(10.0), Val::Px(4.0)),
+                                            align_items: AlignItems::Center,
+                                            border: UiRect::all(Val::Px(1.0)),
+                                            ..default()
+                                        },
+                                        BorderColor::all(Color::srgba(0.45, 0.58, 0.72, 0.35)),
+                                        BackgroundColor(accent),
+                                    ))
+                                    .with_children(|b| {
+                                        b.spawn((
+                                            Text::new(era_label),
+                                            TextFont {
+                                                font_size: FontSize::Px(10.5),
+                                                ..default()
+                                            },
+                                            TextColor(Color::srgb(0.84, 0.90, 0.96)),
+                                        ));
+                                    });
+                            }
+
+                            // 8 connected Tier columns, progression links, and clickable vehicle nodes
+                            for tier in 1u8..=8 {
+                                let card_x = TECH_TREE_PAD_X + (tier - 1) as f32 * TECH_TREE_STEP_X;
+
+                                // Subtle vertical tier column lane backdrop
+                                canvas
+                                    .spawn((
+                                        Node {
+                                            position_type: PositionType::Absolute,
+                                            left: Val::Px(card_x - 8.0),
+                                            top: Val::Px(56.0),
+                                            width: Val::Px(TECH_TREE_CARD_W + 16.0),
+                                            height: Val::Px(284.0),
+                                            padding: UiRect::top(Val::Px(8.0)),
+                                            justify_content: JustifyContent::Center,
+                                            border: UiRect::all(Val::Px(1.0)),
+                                            ..default()
+                                        },
+                                        BorderColor::all(Color::srgba(0.28, 0.36, 0.46, 0.25)),
+                                        BackgroundColor(Color::srgba(0.06, 0.09, 0.14, 0.42)),
+                                    ))
+                                    .with_children(|col| {
+                                        col.spawn((
+                                            Text::new(format!("RANK {}", tier_roman(tier))),
+                                            TextFont {
+                                                font_size: FontSize::Px(10.0),
+                                                ..default()
+                                            },
+                                            TextColor(Color::srgb(0.56, 0.66, 0.78)),
+                                        ));
+                                    });
+
+                                // Progression connector bar + chevron linking Tier -> Tier+1
+                                if tier < 8 {
+                                    let link_x = card_x + TECH_TREE_CARD_W;
+                                    let link_w = TECH_TREE_STEP_X - TECH_TREE_CARD_W;
+                                    let link_y = TECH_TREE_CARD_Y + TECH_TREE_CARD_H * 0.5 - 3.0;
+                                    canvas.spawn((
+                                        TechTreeConnector(tier),
+                                        Node {
+                                            position_type: PositionType::Absolute,
+                                            left: Val::Px(link_x),
+                                            top: Val::Px(link_y),
+                                            width: Val::Px(link_w - 6.0),
+                                            height: Val::Px(6.0),
+                                            ..default()
+                                        },
+                                        BackgroundColor(Color::srgba(0.42, 0.56, 0.72, 0.65)),
+                                    ));
+                                    canvas.spawn((
+                                        Text::new(">"),
+                                        TextFont {
+                                            font_size: FontSize::Px(16.0),
+                                            ..default()
+                                        },
+                                        TextColor(Color::srgb(0.70, 0.84, 0.98)),
+                                        Node {
+                                            position_type: PositionType::Absolute,
+                                            left: Val::Px(link_x + link_w - 13.0),
+                                            top: Val::Px(link_y - 7.0),
+                                            ..default()
+                                        },
+                                    ));
+                                }
+
+                                // Draggable/clickable vehicle node card
+                                canvas
+                                    .spawn((
+                                        TechTreeCardNode(tier),
+                                        HangarAction::SelectTierSlot(tier),
+                                        HangarButtonStyle::VehicleCard,
+                                        Node {
+                                            position_type: PositionType::Absolute,
+                                            left: Val::Px(card_x),
+                                            top: Val::Px(TECH_TREE_CARD_Y),
+                                            width: Val::Px(TECH_TREE_CARD_W),
+                                            height: Val::Px(TECH_TREE_CARD_H),
+                                            padding: UiRect::all(Val::Px(11.0)),
+                                            flex_direction: FlexDirection::Column,
+                                            justify_content: JustifyContent::SpaceBetween,
+                                            border: UiRect::all(Val::Px(2.0)),
+                                            ..default()
+                                        },
+                                        BorderColor::all(Color::srgba(0.38, 0.48, 0.58, 0.65)),
+                                        BackgroundColor(Color::srgba(0.10, 0.14, 0.19, 0.96)),
+                                    ))
+                                    .with_children(|card| {
+                                        card.spawn((
+                                            HangarDynamicText::TechCardTitle(tier),
+                                            Text::new(format!("TIER {}", tier_roman(tier))),
+                                            TextFont {
+                                                font_size: FontSize::Px(13.5),
+                                                ..default()
+                                            },
+                                            TextColor(Color::WHITE),
+                                        ));
+                                        card.spawn((
+                                            HangarDynamicText::TechCardSub(tier),
+                                            Text::new(""),
+                                            TextFont {
+                                                font_size: FontSize::Px(10.5),
+                                                ..default()
+                                            },
+                                            TextColor(Color::srgb(0.76, 0.82, 0.88)),
+                                        ));
+                                    });
+                            }
+                        });
+                });
             });
 
             // 2c. Right Spec Preview Card + VIEW IN HANGAR & PRIMARY ACTION button (matching images.jpg)
@@ -1219,6 +1447,182 @@ fn setup_hangar_ui(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn update_tech_tree_pan(
+    time: Res<Time>,
+    mouse_buttons: Res<ButtonInput<MouseButton>>,
+    mouse_motion: Res<AccumulatedMouseMotion>,
+    mouse_scroll: Res<AccumulatedMouseScroll>,
+    window_q: Query<&Window, With<PrimaryWindow>>,
+    catalog: Res<CatalogResource>,
+    selected: Res<SelectedVehicle>,
+    mut pan: ResMut<TechTreePanState>,
+    viewport_q: Query<(&ComputedNode, &UiGlobalTransform), With<TechTreeViewport>>,
+    cards_q: Query<(&TechTreeCardNode, &ComputedNode, &UiGlobalTransform)>,
+    mut canvas_q: Query<&mut Node, With<TechTreeCanvas>>,
+) {
+    pan.pending_click_tier = None;
+
+    let is_tech_tree = selected.view_mode == HangarViewMode::TechTree;
+    if !is_tech_tree {
+        pan.dragging = false;
+        pan.pressed_tier = None;
+        pan.velocity = Vec2::ZERO;
+        pan.was_tech_tree = false;
+        return;
+    }
+
+    if !pan.was_tech_tree {
+        pan.was_tech_tree = true;
+        let current_tier = catalog
+            .0
+            .by_id(&selected.vehicle_id)
+            .map_or(1, |s| s.tier);
+        pan.needs_center_on_tier = Some(current_tier);
+    }
+
+    let Ok((vp_comp, vp_gtf)) = viewport_q.single() else {
+        return;
+    };
+    let Ok(mut canvas_node) = canvas_q.single_mut() else {
+        return;
+    };
+
+    let scale_factor = window_q
+        .single()
+        .ok()
+        .map_or(1.0, |w| w.scale_factor().max(0.5));
+    let cursor_phys = window_q
+        .single()
+        .ok()
+        .and_then(|w| w.physical_cursor_position());
+    let vp_size_phys = vp_comp.size();
+    let vp_visible = vp_size_phys.x > 4.0 && vp_size_phys.y > 4.0;
+    let vp_size = if vp_visible {
+        vp_size_phys / scale_factor
+    } else {
+        Vec2::new(920.0, 520.0)
+    };
+    let cursor_in_vp = vp_visible && cursor_phys.is_some_and(|p| vp_comp.contains_point(*vp_gtf, p));
+
+    // Dynamic clamp bounds in logical pixels (centers cleanly if viewport is wider than canvas)
+    let (min_x, max_x) = if TECH_TREE_CANVAS_W > vp_size.x {
+        (vp_size.x - TECH_TREE_CANVAS_W, 0.0)
+    } else {
+        let cx = (vp_size.x - TECH_TREE_CANVAS_W) * 0.5;
+        (cx, cx)
+    };
+    let (min_y, max_y) = if TECH_TREE_CANVAS_H > vp_size.y {
+        (vp_size.y - TECH_TREE_CANVAS_H, 0.0)
+    } else {
+        let cy = ((vp_size.y - TECH_TREE_CANVAS_H) * 0.5).max(0.0);
+        // Allow gentle vertical drag play around vertical center
+        (cy - 36.0, cy + 36.0)
+    };
+
+    // Center smoothly on requested tier (when entering TechTree, clicking CENTER, or pressing 1-8)
+    if let Some(tier) = pan.needs_center_on_tier.take() {
+        let card_center_x = TECH_TREE_PAD_X
+            + (tier.saturating_sub(1)) as f32 * TECH_TREE_STEP_X
+            + TECH_TREE_CARD_W * 0.5;
+        let desired_x = (vp_size.x * 0.5 - card_center_x).clamp(min_x, max_x);
+        let desired_y = ((vp_size.y - TECH_TREE_CANVAS_H) * 0.5).clamp(min_y, max_y);
+        pan.target_offset = Vec2::new(desired_x, desired_y);
+        pan.velocity = Vec2::ZERO;
+    }
+
+    let dt = time.delta_secs().clamp(0.001, 0.05);
+
+    // Mouse-down inside the Research Tree viewport starts a drag-or-click gesture
+    if cursor_in_vp
+        && (mouse_buttons.just_pressed(MouseButton::Left)
+            || mouse_buttons.just_pressed(MouseButton::Middle))
+    {
+        pan.dragging = true;
+        pan.drag_moved_px = 0.0;
+        pan.velocity = Vec2::ZERO;
+        pan.pressed_tier = if mouse_buttons.just_pressed(MouseButton::Left) {
+            cursor_phys.and_then(|p| {
+                cards_q.iter().find_map(|(card, comp, gtf)| {
+                    (comp.size().x > 1.0 && comp.size().y > 1.0 && comp.contains_point(*gtf, p))
+                        .then_some(card.0)
+                })
+            })
+        } else {
+            None
+        };
+    }
+
+    let drag_held =
+        mouse_buttons.pressed(MouseButton::Left) || mouse_buttons.pressed(MouseButton::Middle);
+
+    if pan.dragging && drag_held {
+        let delta = mouse_motion.delta;
+        if delta.length_squared() > 0.0001 {
+            pan.drag_moved_px += delta.length();
+            pan.target_offset += delta;
+            pan.target_offset.x = pan.target_offset.x.clamp(min_x, max_x);
+            pan.target_offset.y = pan.target_offset.y.clamp(min_y, max_y);
+            pan.offset = pan.target_offset;
+            pan.velocity = delta / dt;
+        } else {
+            pan.velocity *= (1.0 - dt * 18.0).max(0.0);
+        }
+    } else if pan.dragging {
+        // Button released: decide between click and drag
+        pan.dragging = false;
+        if pan.drag_moved_px < TECH_TREE_CLICK_MAX_DRAG_PX
+            && let Some(tier) = pan.pressed_tier
+        {
+            pan.pending_click_tier = Some(tier);
+            pan.velocity = Vec2::ZERO;
+        }
+        pan.pressed_tier = None;
+    }
+
+    // Mouse wheel slides the Research Tree smoothly horizontally (vertical wheel or trackpad)
+    if cursor_in_vp && !pan.dragging {
+        let wheel = mouse_scroll.delta;
+        let slide_x = (wheel.y + wheel.x) * 84.0;
+        if slide_x.abs() > 0.01 {
+            pan.target_offset.x = (pan.target_offset.x + slide_x).clamp(min_x, max_x);
+            pan.velocity = Vec2::ZERO;
+        }
+    }
+
+    // Apply smooth release inertia and spring interpolation
+    if !pan.dragging {
+        if pan.velocity.length_squared() > 9.0 {
+            let step = pan.velocity * dt;
+            pan.target_offset += step;
+            pan.target_offset.x = pan.target_offset.x.clamp(min_x, max_x);
+            pan.target_offset.y = pan.target_offset.y.clamp(min_y, max_y);
+            let damp = (-8.5 * dt).exp();
+            pan.velocity *= damp;
+        } else {
+            pan.velocity = Vec2::ZERO;
+        }
+        let lerp_t = 1.0 - (-14.0 * dt).exp();
+        let target = pan.target_offset;
+        pan.offset = pan.offset.lerp(target, lerp_t);
+    }
+
+    pan.offset.x = pan.offset.x.clamp(min_x, max_x);
+    pan.offset.y = pan.offset.y.clamp(min_y, max_y);
+    canvas_node.left = Val::Px(pan.offset.x);
+    canvas_node.top = Val::Px(pan.offset.y);
+}
+
+type HangarButtonQueryItem<'a> = (
+    &'a HangarAction,
+    &'a HangarButtonStyle,
+    Option<&'a TechTreeCardNode>,
+    &'a ComputedNode,
+    &'a UiGlobalTransform,
+    &'a mut BackgroundColor,
+    &'a mut BorderColor,
+);
+
+#[allow(clippy::too_many_arguments)]
 fn handle_hangar_ui_interaction(
     keys: Res<ButtonInput<KeyCode>>,
     mouse_buttons: Res<ButtonInput<MouseButton>>,
@@ -1226,22 +1630,23 @@ fn handle_hangar_ui_interaction(
     catalog: Res<CatalogResource>,
     mut economy: ResMut<EconomyResource>,
     mut selected: ResMut<SelectedVehicle>,
+    mut orbit: ResMut<HangarOrbitState>,
+    mut pan: ResMut<TechTreePanState>,
     mut sim: ResMut<SimResource>,
     mut next_state: ResMut<NextState<AppState>>,
-    mut btn_q: Query<(
-        &HangarAction,
-        &HangarButtonStyle,
-        &ComputedNode,
-        &UiGlobalTransform,
-        &mut BackgroundColor,
-        &mut BorderColor,
-    )>,
+    viewport_q: Query<(&ComputedNode, &UiGlobalTransform), With<TechTreeViewport>>,
+    mut btn_q: Query<HangarButtonQueryItem>,
 ) {
     let cursor_phys = window_q
         .single()
         .ok()
         .and_then(|w| w.physical_cursor_position());
     let clicked = mouse_buttons.just_pressed(MouseButton::Left);
+    let cursor_in_tech_vp = viewport_q.single().ok().is_some_and(|(vp_comp, vp_gtf)| {
+        vp_comp.size().x > 4.0
+            && vp_comp.size().y > 4.0
+            && cursor_phys.is_some_and(|p| vp_comp.contains_point(*vp_gtf, p))
+    });
 
     let current_spec = catalog
         .0
@@ -1257,6 +1662,7 @@ fn handle_hangar_ui_interaction(
     let can_buy_curr = economy.profile.can_buy(&catalog.0, &selected.vehicle_id);
 
     let mut trigger_primary = keys.just_pressed(KeyCode::Enter);
+    let mut pending_action: Option<HangarAction> = None;
 
     if keys.just_pressed(KeyCode::Tab) {
         selected.view_mode = match selected.view_mode {
@@ -1264,20 +1670,80 @@ fn handle_hangar_ui_interaction(
             HangarViewMode::TechTree => HangarViewMode::Podium,
         };
     }
+    // Keyboard shortcuts: Left/Right cycle maps, Q/E cycle nations, 1-8 pick tier
+    if keys.just_pressed(KeyCode::ArrowLeft) {
+        pending_action = Some(HangarAction::PrevMap);
+    } else if keys.just_pressed(KeyCode::ArrowRight) {
+        pending_action = Some(HangarAction::NextMap);
+    } else if keys.just_pressed(KeyCode::KeyQ) || keys.just_pressed(KeyCode::KeyE) {
+        let cur_idx = Nation::ALL
+            .iter()
+            .position(|&n| n == selected.nation)
+            .unwrap_or(0);
+        let step: i32 = if keys.just_pressed(KeyCode::KeyE) { 1 } else { -1 };
+        let next_idx = (cur_idx as i32 + step).rem_euclid(Nation::ALL.len() as i32) as usize;
+        pending_action = Some(HangarAction::SelectNation(Nation::ALL[next_idx]));
+    } else {
+        let tier_keys = [
+            (KeyCode::Digit1, 1u8),
+            (KeyCode::Digit2, 2),
+            (KeyCode::Digit3, 3),
+            (KeyCode::Digit4, 4),
+            (KeyCode::Digit5, 5),
+            (KeyCode::Digit6, 6),
+            (KeyCode::Digit7, 7),
+            (KeyCode::Digit8, 8),
+        ];
+        for (kc, t) in tier_keys {
+            if keys.just_pressed(kc) {
+                pending_action = Some(HangarAction::SelectTierSlot(t));
+                pan.needs_center_on_tier = Some(t);
+                break;
+            }
+        }
+    }
 
-    let mut pending_action: Option<HangarAction> = None;
+    // Consume click-vs-drag card release from the Research Tree canvas
+    if let Some(clicked_tier) = pan.pending_click_tier.take() {
+        if clicked_tier == current_tier {
+            // Second click on an already-selected Researchable or Researched card executes unlock/purchase
+            if matches!(
+                current_ownership,
+                VehicleOwnership::Researchable | VehicleOwnership::Researched
+            ) {
+                trigger_primary = true;
+            }
+        } else {
+            pending_action = Some(HangarAction::SelectTierSlot(clicked_tier));
+        }
+    }
 
-    for (action, style, computed, ui_gtf, mut bg, mut border) in &mut btn_q {
-        let hovered = cursor_phys.is_some_and(|p| computed.contains_point(*ui_gtf, p));
-        if hovered && clicked {
-            pending_action = Some(*action);
+    let mut any_button_hovered = false;
+    for (action, style, tech_card, computed, ui_gtf, mut bg, mut border) in &mut btn_q {
+        let visible_size = computed.size().x > 1.0 && computed.size().y > 1.0;
+        let is_tech_card = tech_card.is_some();
+        // Cards inside the clipped Research Tree viewport are only hoverable when cursor is inside the viewport
+        let in_clip = !is_tech_card || cursor_in_tech_vp;
+        let hovered = visible_size
+            && in_clip
+            && !pan.dragging
+            && cursor_phys.is_some_and(|p| computed.contains_point(*ui_gtf, p));
+        if hovered {
+            any_button_hovered = true;
+            // Non-tech-card buttons trigger on mouse-down; Tech Tree cards trigger on drag-free mouse-up above
+            if clicked && !is_tech_card {
+                pending_action = Some(*action);
+            }
         }
 
         let is_active = match *action {
             HangarAction::SetViewMode(m) => selected.view_mode == m,
             HangarAction::SelectNation(n) => selected.nation == n,
             HangarAction::SelectTierSlot(t) => current_tier == t,
-            HangarAction::EnterBattle | HangarAction::PrevMap | HangarAction::NextMap => false,
+            HangarAction::EnterBattle
+            | HangarAction::PrevMap
+            | HangarAction::NextMap
+            | HangarAction::ResetTechTreePan => false,
         };
 
         let (fill, rim) = match style {
@@ -1409,6 +1875,7 @@ fn handle_hangar_ui_interaction(
         bg.0 = fill;
         *border = BorderColor::all(rim);
     }
+    orbit.over_ui = any_button_hovered;
 
     if let Some(action) = pending_action {
         match action {
@@ -1425,6 +1892,7 @@ fn handle_hangar_ui_interaction(
                         selected.vehicle_id = spec.id.clone();
                         selected.preview_dirty = true;
                     }
+                    pan.needs_center_on_tier = Some(current_tier);
                 }
             }
             HangarAction::SelectTierSlot(tier) => {
@@ -1440,6 +1908,9 @@ fn handle_hangar_ui_interaction(
             }
             HangarAction::NextMap => {
                 selected.map_id = selected.map_id.next();
+            }
+            HangarAction::ResetTechTreePan => {
+                pan.needs_center_on_tier = Some(current_tier);
             }
         }
     }
@@ -1509,6 +1980,7 @@ fn sync_hangar_ui_content(
     economy: Res<EconomyResource>,
     selected: Res<SelectedVehicle>,
     mut layer_q: Query<(&HangarLayer, &mut Node)>,
+    mut conn_q: Query<(&TechTreeConnector, &mut BackgroundColor)>,
     mut text_q: Query<(&HangarDynamicText, &mut Text, &mut TextColor)>,
 ) {
     for (layer, mut node) in &mut layer_q {
@@ -1516,6 +1988,21 @@ fn sync_hangar_ui_content(
             Display::Flex
         } else {
             Display::None
+        };
+    }
+
+    for (conn, mut bg) in &mut conn_q {
+        let next_state = catalog
+            .0
+            .by_nation_and_tier(selected.nation, conn.0 + 1)
+            .map_or(VehicleOwnership::Locked, |v| {
+                economy.profile.ownership_state(&catalog.0, &v.id)
+            });
+        bg.0 = match next_state {
+            VehicleOwnership::Owned => Color::srgba(0.32, 0.84, 0.48, 0.90),
+            VehicleOwnership::Researched => Color::srgba(0.95, 0.78, 0.28, 0.88),
+            VehicleOwnership::Researchable => Color::srgba(0.34, 0.78, 0.98, 0.85),
+            VehicleOwnership::Locked => Color::srgba(0.30, 0.36, 0.44, 0.45),
         };
     }
 

@@ -139,6 +139,8 @@ pub struct VoxelWorld {
     pub materials: MaterialRegistry,
     chunks: HashMap<IVec3, VoxelChunk>,
     dirty_chunks: HashSet<IVec3>,
+    /// Original voxels modified by runtime explosions, allowing instant map restoration on battle restart.
+    destruction_backups: HashMap<IVec3, VoxelId>,
     /// Inclusive voxel coordinate bounds of the playable map.
     pub bounds_min: IVec3,
     pub bounds_max: IVec3,
@@ -157,6 +159,7 @@ impl VoxelWorld {
             materials: MaterialRegistry::new(),
             chunks: HashMap::new(),
             dirty_chunks: HashSet::new(),
+            destruction_backups: HashMap::new(),
             bounds_min: IVec3::ZERO,
             bounds_max: IVec3::ZERO,
         }
@@ -517,6 +520,7 @@ impl VoxelWorld {
                     let falloff = (1.0 - norm.powf(1.35)).max(0.0);
                     let resist = self.materials.get(id).blast_resistance;
                     if blast_power * falloff >= resist {
+                        self.destruction_backups.entry(pos).or_insert(id);
                         self.set_voxel(pos, VoxelId::AIR);
                         destroyed += 1;
                         if debris.len() < 16 && (destroyed <= 6 || destroyed.is_multiple_of(3)) {
@@ -537,8 +541,10 @@ impl VoxelWorld {
                 b_id,
                 VoxelId::GRASS | VoxelId::GRASS_DARK | VoxelId::SNOW | VoxelId::SAND
             ) {
+                self.destruction_backups.entry(below).or_insert(b_id);
                 self.set_voxel(below, VoxelId::DIRT);
             } else if matches!(b_id, VoxelId::BRICK | VoxelId::PLASTER_WALL | VoxelId::MUDBRICK) {
+                self.destruction_backups.entry(below).or_insert(b_id);
                 self.set_voxel(below, VoxelId::RUBBLE);
             }
         }
@@ -547,6 +553,26 @@ impl VoxelWorld {
             destroyed_voxels: destroyed,
             debris,
         }
+    }
+
+    /// Number of voxel coordinates currently modified by runtime explosions since last restore.
+    #[inline]
+    pub fn destroyed_voxel_backup_count(&self) -> usize {
+        self.destruction_backups.len()
+    }
+
+    /// Instantly restores every voxel destroyed or scorched during the previous battle without
+    /// regenerating the entire map, marking affected chunks dirty for incremental remeshing.
+    pub fn restore_destructible_voxels(&mut self) -> usize {
+        if self.destruction_backups.is_empty() {
+            return 0;
+        }
+        let entries: Vec<(IVec3, VoxelId)> = self.destruction_backups.drain().collect();
+        let count = entries.len();
+        for (pos, orig_id) in entries {
+            self.set_voxel(pos, orig_id);
+        }
+        count
     }
 }
 

@@ -20,9 +20,10 @@ pub use battle::{
 };
 pub use catalog::{Nation, VehicleCatalog, VehicleClass, VehicleSpec, tier_roman};
 pub use damage::{
-    ArmorHit, ArmorProfile, ArmorType, CREW_TRANSFER_TIME, CrewMemberState, CrewRole,
-    DamageModifiers, FIRE_BURNOUT_TIME, HitOutcome, HitReport, KillReason, MIN_OPERATIONAL_CREW,
-    ModuleHealth, ModuleKind, ModuleState, NO_LOADER_RELOAD_MULT, PartFrame, TankDamageState,
+    AimTelemetry, ArmorHit, ArmorPenAssessment, ArmorProfile, ArmorType, CREW_TRANSFER_TIME,
+    CrewMemberState, CrewRole, DamageModifiers, FIRE_BURNOUT_TIME, FPE_COOLDOWN_SECS,
+    FPE_MAX_CHARGES, HitOutcome, HitReport, KillReason, MIN_OPERATIONAL_CREW, ModuleHealth,
+    ModuleKind, ModuleState, NO_LOADER_RELOAD_MULT, PartFrame, PenIndicator, TankDamageState,
     raycast_tank_armor, resolve_ap_impact, resolve_he_impact, resolve_he_splash,
     resolve_shell_impact,
 };
@@ -1276,5 +1277,146 @@ mod tests {
         }
         assert!(sim.player_tank().is_loaded());
         assert_eq!(sim.player_tank().active_shell().kind, ShellKind::He);
+    }
+
+    #[test]
+    fn fpe_extinguishes_fire_and_field_repair_restores_disabled_modules() {
+        let voxels = generate_flat_proving_ground(96);
+        let models = build_basic_tank_models();
+        let cfg = TankConfig::stage1_basic(&models);
+        let mut sim = SimWorld::new(voxels, cfg);
+
+        // 1. Ignite engine fire and extinguish with FPE ([6])
+        sim.tanks[0].damage.on_fire = true;
+        assert_eq!(sim.tanks[0].damage.fpe_charges, FPE_MAX_CHARGES);
+        sim.step_fixed(
+            FIXED_DT,
+            TankInput {
+                use_fpe: true,
+                ..Default::default()
+            },
+        );
+        assert!(!sim.tanks[0].damage.on_fire, "FPE must extinguish active fire");
+        assert_eq!(sim.tanks[0].damage.fpe_charges, FPE_MAX_CHARGES - 1);
+        assert!(sim.recent_fpe_uses.contains(&TankId(0)));
+
+        // 2. Break Gun Breech & Left Track, then trigger Field Repair ([F])
+        for m in &mut sim.tanks[0].damage.modules {
+            if matches!(m.kind, ModuleKind::GunBreech | ModuleKind::LeftTrack) {
+                m.apply_damage(200.0);
+            }
+        }
+        assert!(!sim.tanks[0].damage.can_fire());
+        assert!(sim.tanks[0].damage.needs_repair());
+
+        sim.step_fixed(
+            FIXED_DT,
+            TankInput {
+                toggle_repair: true,
+                ..Default::default()
+            },
+        );
+        assert!(sim.tanks[0].damage.repairing);
+        assert!(
+            !sim.tanks[0].damage.can_move(),
+            "tank must remain stationary while performing field repairs"
+        );
+
+        let mut completed = false;
+        for _ in 0..(16 * 60) {
+            sim.step_fixed(FIXED_DT, TankInput::default());
+            if sim.recent_repairs_completed.contains(&TankId(0)) {
+                completed = true;
+                break;
+            }
+        }
+        assert!(completed, "field repair must complete within timer budget");
+        assert!(!sim.tanks[0].damage.repairing);
+        assert!(sim.tanks[0].damage.can_fire(), "repaired breech must restore firing");
+        assert!(sim.tanks[0].damage.can_move(), "repaired track must restore mobility");
+    }
+
+    #[test]
+    fn casemate_gunner_replacement_stays_in_hull_and_aim_telemetry_assesses_armor() {
+        let catalog = VehicleCatalog::stage5_catalog();
+        let stug = catalog.by_id("de_stug3g").unwrap();
+        let mut stug_dmg = TankDamageState::from_profile(&stug.armor);
+        assert!(stug_dmg.is_casemate);
+
+        // Knock out casemate Gunner and run 6.5s transfer -> replacement must stay in Hull frame
+        let gunner_idx = stug_dmg
+            .crew
+            .iter()
+            .position(|c| c.active_seat == CrewRole::Gunner)
+            .unwrap();
+        stug_dmg.crew[gunner_idx].apply_damage(100.0);
+        let mut rng = SimRng::new(17);
+        for _ in 0..(7 * 60) {
+            assert!(stug_dmg.tick_ongoing(FIXED_DT, &mut rng).is_none());
+        }
+        let new_gunner = stug_dmg
+            .crew
+            .iter()
+            .find(|c| c.alive && c.active_seat == CrewRole::Gunner)
+            .expect("spare crewman must replace casemate gunner");
+        assert_eq!(
+            new_gunner.frame,
+            PartFrame::Hull,
+            "casemate replacement gunner must sit in Hull frame, not Turret"
+        );
+
+        // Live aim telemetry: broadside medium tank at 45m -> PenIndicator::Likely + gravity drop
+        let voxels = generate_flat_proving_ground(128);
+        let models = build_basic_tank_models();
+        let cfg = TankConfig::stage1_basic(&models);
+        let map = default_metadata_for_world(&voxels, "range_test", "Range");
+        let mut sim = SimWorld::new_team_battle(voxels, map, cfg, 1);
+        sim.brains[1] = None;
+        sim.tanks[1].state.position = Vec3::new(0.0, 0.0, -45.0);
+        sim.tanks[1].state.hull_yaw = std::f32::consts::FRAC_PI_2;
+
+        // Aim player gun straight at enemy hull side center
+        for _ in 0..90 {
+            sim.step_fixed(
+                FIXED_DT,
+                TankInput {
+                    aim_world_point: Vec3::new(0.0, 1.0, -45.0),
+                    ..Default::default()
+                },
+            );
+        }
+        let tel = sim.evaluate_aim_telemetry(0, 400.0);
+        assert!(tel.distance_m > 35.0 && tel.distance_m < 50.0);
+        let assessment = tel
+            .assessment
+            .expect("aiming at broadside enemy must return ArmorPenAssessment");
+        assert_eq!(assessment.indicator, PenIndicator::Likely);
+        assert!(assessment.penetration_mm > assessment.effective_armor_mm);
+        assert!(
+            tel.ballistic_impact_point.y <= tel.bore_point.y + 0.05,
+            "ballistic impact point must account for downward gravity drop"
+        );
+    }
+
+    #[test]
+    fn restart_battle_restores_carved_voxel_terrain_cleanly() {
+        let mut world = generate_flat_proving_ground(64);
+        world.bounds_max.y = 12;
+        world.fill_box(IVec3::new(-4, 0, -22), IVec3::new(4, 4, -20), VoxelId::BRICK);
+        let models = build_basic_tank_models();
+        let mut sim = SimWorld::new(world, TankConfig::stage1_basic(&models));
+
+        let res = sim
+            .voxels
+            .carve_explosion(Vec3::new(0.0, 1.0, -10.5), 3.0, 8.0);
+        assert!(res.destroyed_voxels > 0);
+        assert_eq!(sim.voxels.get_voxel(IVec3::new(0, 2, -21)), VoxelId::AIR);
+
+        sim.restart_battle();
+        assert_eq!(
+            sim.voxels.get_voxel(IVec3::new(0, 2, -21)),
+            VoxelId::BRICK,
+            "restart_battle must restore carved buildings and craters"
+        );
     }
 }

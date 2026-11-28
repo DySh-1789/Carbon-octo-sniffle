@@ -2,6 +2,7 @@ use bevy::prelude::*;
 use sim::{FIXED_DT, SimWorld, VehicleCatalog, generate_european_valley_map};
 
 use crate::bridge::{BattleControlResource, PendingSimEvents, PlayerInputResource, SimResource};
+use crate::camera::TankCameraController;
 use crate::state::{AppState, CatalogResource, SelectedVehicle};
 
 /// Headless-compatible simulation plugin (runs with `MinimalPlugins` + `StatesPlugin` for automated tests).
@@ -36,7 +37,8 @@ impl Plugin for BattleSimPlugin {
     }
 }
 
-/// Interactive keyboard/mouse input plugin for driving, firing, restarting, and returning to Hangar.
+/// Interactive keyboard/mouse input plugin for driving, firing, FPE, field repair, cruise control,
+/// restarting, and returning to Hangar.
 pub struct PlayerInputPlugin;
 
 impl Plugin for PlayerInputPlugin {
@@ -52,6 +54,7 @@ fn gather_player_driving_and_fire_input(
     keys: Res<ButtonInput<KeyCode>>,
     mouse_buttons: Res<ButtonInput<MouseButton>>,
     sim: Res<SimResource>,
+    cam_ctrl: Option<Res<TankCameraController>>,
     mut input: ResMut<PlayerInputResource>,
     mut control: ResMut<BattleControlResource>,
 ) {
@@ -68,17 +71,40 @@ fn gather_player_driving_and_fire_input(
     if battle_over || !player_alive {
         input.throttle = 0.0;
         input.steer = 0.0;
+        input.cruise_gear = 0;
         input.fire_queued = false;
+        input.use_fpe_queued = false;
+        input.toggle_repair_queued = false;
         return;
     }
 
-    let mut throttle = 0.0f32;
+    // War Thunder-style cruise control (`E` steps up: R -> N -> CC1 -> CC2; `Q` steps down; `W`/`S` overrides)
+    if keys.just_pressed(KeyCode::KeyE) {
+        input.cruise_gear = (input.cruise_gear + 1).clamp(-1, 2);
+    } else if keys.just_pressed(KeyCode::KeyQ) {
+        input.cruise_gear = (input.cruise_gear - 1).clamp(-1, 2);
+    }
+
+    let mut manual_throttle = 0.0f32;
     if keys.pressed(KeyCode::KeyW) || keys.pressed(KeyCode::ArrowUp) {
-        throttle += 1.0;
+        manual_throttle += 1.0;
+        input.cruise_gear = 0;
     }
     if keys.pressed(KeyCode::KeyS) || keys.pressed(KeyCode::ArrowDown) {
-        throttle -= 1.0;
+        manual_throttle -= 1.0;
+        input.cruise_gear = 0;
     }
+
+    let throttle = if manual_throttle.abs() > 0.01 {
+        manual_throttle
+    } else {
+        match input.cruise_gear {
+            -1 => -1.0,
+            1 => 0.55,
+            2 => 1.0,
+            _ => 0.0,
+        }
+    };
 
     let mut steer = 0.0f32;
     if keys.pressed(KeyCode::KeyA) || keys.pressed(KeyCode::ArrowLeft) {
@@ -99,7 +125,22 @@ fn gather_player_driving_and_fire_input(
         input.select_shell = Some(2);
     }
 
-    if mouse_buttons.just_pressed(MouseButton::Left) || keys.just_pressed(KeyCode::Space) {
+    // Tactical survival hotkeys: [6] Fire Prevention Equipment (FPE), [F] Field Repair Kit
+    if keys.just_pressed(KeyCode::Digit6) {
+        input.use_fpe_queued = true;
+    }
+    if keys.just_pressed(KeyCode::KeyF) {
+        input.toggle_repair_queued = true;
+        input.cruise_gear = 0;
+    }
+
+    // Prevent accidental cannon discharge when clicking the viewport to lock cursor or clicking UI buttons
+    let lmb_can_fire = cam_ctrl
+        .as_deref()
+        .is_none_or(|c| c.cursor_locked && !c.just_locked_this_frame);
+    if (lmb_can_fire && mouse_buttons.just_pressed(MouseButton::Left))
+        || keys.just_pressed(KeyCode::Space)
+    {
         input.fire_queued = true;
     }
 }
@@ -127,6 +168,7 @@ fn step_simulation(
 ) {
     if control.restart_requested {
         control.restart_requested = false;
+        input.cruise_gear = 0;
         input.take_for_step();
         sim.0.restart_battle();
         events.clear_frame_events();
@@ -148,6 +190,14 @@ fn step_simulation(
     }
     if !sim.0.recent_kills.is_empty() {
         events.kills.append(&mut sim.0.recent_kills);
+    }
+    if !sim.0.recent_fpe_uses.is_empty() {
+        events.fpe_uses.append(&mut sim.0.recent_fpe_uses);
+    }
+    if !sim.0.recent_repairs_completed.is_empty() {
+        events
+            .repairs_completed
+            .append(&mut sim.0.recent_repairs_completed);
     }
 }
 

@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use sim::{FiredShot, HitReport, ImpactEvent, KillEvent, SimWorld, TankInput};
+use sim::{FiredShot, HitReport, ImpactEvent, KillEvent, SimWorld, TankId, TankInput};
 use voxel::glam;
 
 /// Converts a `voxel`/`sim` `Vec3` into Bevy's `Vec3`.
@@ -34,6 +34,12 @@ pub struct PlayerInputResource {
     pub fire_queued: bool,
     /// Latched shell slot selection (`Digit1`/`Digit2`/`Digit3`).
     pub select_shell: Option<usize>,
+    /// Latched Fire Prevention Equipment (`Digit6`) request.
+    pub use_fpe_queued: bool,
+    /// Latched Field Repair Kit (`KeyF`) toggle request.
+    pub toggle_repair_queued: bool,
+    /// War Thunder-style cruise control gear (`-1` = reverse, `0` = manual, `1` = half, `2` = full).
+    pub cruise_gear: i8,
 }
 
 impl PlayerInputResource {
@@ -41,12 +47,18 @@ impl PlayerInputResource {
         let fire = self.fire_queued;
         self.fire_queued = false;
         let select_shell = self.select_shell.take();
+        let use_fpe = self.use_fpe_queued;
+        self.use_fpe_queued = false;
+        let toggle_repair = self.toggle_repair_queued;
+        self.toggle_repair_queued = false;
         TankInput {
             throttle: self.throttle,
             steer: self.steer,
             aim_world_point: self.aim_world_point,
             fire,
             select_shell,
+            use_fpe,
+            toggle_repair,
         }
     }
 }
@@ -66,6 +78,8 @@ pub struct PendingSimEvents {
     pub impacts: Vec<ImpactEvent>,
     pub hit_reports: Vec<HitReport>,
     pub kills: Vec<KillEvent>,
+    pub fpe_uses: Vec<TankId>,
+    pub repairs_completed: Vec<TankId>,
     pub battle_restarted: bool,
 }
 
@@ -75,6 +89,8 @@ impl PendingSimEvents {
         self.impacts.clear();
         self.hit_reports.clear();
         self.kills.clear();
+        self.fpe_uses.clear();
+        self.repairs_completed.clear();
         self.battle_restarted = false;
     }
 }

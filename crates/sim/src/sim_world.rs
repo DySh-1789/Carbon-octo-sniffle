@@ -4,13 +4,15 @@ use voxel::glam::Vec3;
 use voxel::{VoxelWorld, raycast_world};
 
 use crate::ai::{BotBrain, BotContext, BotObjective, NavGrid};
-use crate::ballistics::{ImpactEvent, Projectile};
+use crate::ballistics::{GRAVITY, ImpactEvent, Projectile};
 use crate::battle::{
     BattleMode, BattleState, KILL_TICKET_PENALTY, KillEvent, MAX_TANKS, SimRng, TankId, TankUnit,
     Team, VISION_RANGE, raycast_tanks, raycast_tanks_armor, resolve_tank_collisions,
 };
 use crate::catalog::VehicleCatalog;
-use crate::damage::{ArmorHit, HitOutcome, HitReport, KillReason};
+use crate::damage::{
+    AimTelemetry, ArmorHit, ArmorPenAssessment, HitOutcome, HitReport, KillReason, PenIndicator,
+};
 use crate::map_gen::{MapMetadata, default_metadata_for_world};
 use crate::tank::{FiredShot, TankConfig, TankInput, TankState};
 
@@ -42,6 +44,8 @@ pub struct SimWorld {
     pub recent_shots: Vec<FiredShot>,
     pub recent_hit_reports: Vec<HitReport>,
     pub recent_kills: Vec<KillEvent>,
+    pub recent_fpe_uses: Vec<TankId>,
+    pub recent_repairs_completed: Vec<TankId>,
     pub tick: u64,
     base_config: TankConfig,
     /// Optional per-slot vehicle configurations for Stage 5 multi-vehicle tier battles.
@@ -191,6 +195,8 @@ impl SimWorld {
             recent_shots: Vec::new(),
             recent_hit_reports: Vec::new(),
             recent_kills: Vec::new(),
+            recent_fpe_uses: Vec::new(),
+            recent_repairs_completed: Vec::new(),
             tick: 0,
             base_config: tank_config,
             allies_lineup: Vec::new(),
@@ -203,15 +209,18 @@ impl SimWorld {
         sim
     }
 
-    /// Instantly restarts the battle in place, reusing the voxel world, map metadata, and nav grid
-    /// (no world regeneration and no extra memory).
+    /// Instantly restarts the battle in place, restoring any carved buildings/craters and reusing
+    /// the voxel world, map metadata, and nav grid (no full map regeneration and no extra memory).
     pub fn restart_battle(&mut self) {
+        self.voxels.restore_destructible_voxels();
         self.battle = BattleState::new(self.battle.mode, &self.map);
         self.projectiles.clear();
         self.recent_impacts.clear();
         self.recent_shots.clear();
         self.recent_hit_reports.clear();
         self.recent_kills.clear();
+        self.recent_fpe_uses.clear();
+        self.recent_repairs_completed.clear();
         self.visibility = [0; MAX_TANKS];
         self.tick = 0;
         self.spawn_tanks();
@@ -348,6 +357,155 @@ impl SimWorld {
         world_hit.map(|h| h.point)
     }
 
+    /// Evaluates live War Thunder gun-bore rangefinder distance, gravity/drag-compensated
+    /// ballistic impact point, and color-coded armor penetration assessment against enemy tanks.
+    pub fn evaluate_aim_telemetry(&self, shooter_idx: usize, max_range: f32) -> AimTelemetry {
+        let Some(shooter) = self.tanks.get(shooter_idx) else {
+            return AimTelemetry {
+                bore_point: Vec3::ZERO,
+                distance_m: 0.0,
+                ballistic_impact_point: Vec3::ZERO,
+                assessment: None,
+            };
+        };
+
+        let muzzle = shooter.state.muzzle_world_position();
+        let bore = shooter.state.gun_forward();
+        let shell = shooter.state.active_shell();
+
+        // 1. Straight-line bore raycast (for trailing gun-circle and rangefinder)
+        let world_bore_hit = raycast_world(&self.voxels, muzzle, bore, max_range);
+        let bore_limit = world_bore_hit.map_or(max_range, |h| h.distance);
+        let bore_tank_hit =
+            raycast_tanks_armor(&self.tanks, muzzle, bore, bore_limit, Some(shooter.id));
+
+        let (bore_point, distance_m) = if let Some((_, hit)) = bore_tank_hit {
+            (hit.world_point, hit.distance)
+        } else if let Some(h) = world_bore_hit {
+            (h.point, h.distance)
+        } else {
+            (muzzle + bore * max_range, max_range)
+        };
+
+        // 2. Stepped ballistic drop curve using the exact active shell velocity, drag & gravity
+        let mut pos = muzzle;
+        let mut vel = bore * shell.muzzle_velocity.max(10.0);
+        let step_dt = 0.035f32;
+        let mut traveled = 0.0f32;
+        let mut ballistic_impact_point = bore_point;
+        let mut ballistic_tank_hit: Option<(usize, ArmorHit, Vec3, f32)> = None;
+
+        for _ in 0..36 {
+            let drag = (1.0 - shell.drag_coeff * step_dt).max(0.0);
+            vel *= drag;
+            vel.y -= GRAVITY * step_dt;
+            let step_vec = vel * step_dt;
+            let step_len = step_vec.length();
+            if step_len <= 1e-4 {
+                break;
+            }
+            let seg_dir = step_vec / step_len;
+            let remain = (max_range - traveled).max(0.0);
+            let seg_max = step_len.min(remain);
+            if seg_max <= 1e-4 {
+                break;
+            }
+
+            let wh = raycast_world(&self.voxels, pos, seg_dir, seg_max);
+            let seg_limit = wh.map_or(seg_max, |h| h.distance);
+            if let Some((ti, armor_hit)) =
+                raycast_tanks_armor(&self.tanks, pos, seg_dir, seg_limit, Some(shooter.id))
+            {
+                ballistic_impact_point = armor_hit.world_point;
+                ballistic_tank_hit = Some((ti, armor_hit, seg_dir, vel.length()));
+                break;
+            }
+            if let Some(h) = wh {
+                ballistic_impact_point = h.point;
+                break;
+            }
+
+            pos += seg_dir * seg_max;
+            traveled += seg_max;
+            ballistic_impact_point = pos;
+            if traveled >= max_range {
+                break;
+            }
+        }
+
+        // 3. Evaluate armor penetration (preferring actual ballistic impact hit, falling back to bore hit)
+        let eval_candidate = ballistic_tank_hit.or_else(|| {
+            bore_tank_hit.map(|(ti, hit)| {
+                let tof = hit.distance / shell.muzzle_velocity.max(10.0);
+                let speed = shell.muzzle_velocity * (-shell.drag_coeff * tof).exp();
+                (ti, hit, bore, speed)
+            })
+        });
+
+        let assessment = eval_candidate.and_then(|(ti, hit, in_dir, impact_speed)| {
+            let target = self.tanks.get(ti)?;
+            if !target.alive || target.team == shooter.team {
+                return None;
+            }
+            let (pen_mm, eff_armor, rico_chance) = if shell.is_he() {
+                let armor = &target.state.config.armor;
+                let weakest_roof = armor.hull_roof_mm.min(armor.turret_roof_mm);
+                let exposed = if hit.frame == crate::damage::PartFrame::Turret
+                    || hit.frame == crate::damage::PartFrame::Gun
+                {
+                    hit.nominal_mm.min(weakest_roof)
+                } else {
+                    hit.nominal_mm.min(armor.hull_roof_mm + 4.0)
+                };
+                (shell.he_pen_mm, exposed * hit.armor_type.multiplier(), 0.0)
+            } else {
+                let raw_cos = (-in_dir).dot(hit.plate_normal_world);
+                let plate_n = if raw_cos > 0.03 {
+                    hit.plate_normal_world
+                } else {
+                    hit.geom_normal_world
+                };
+                let cos_theta = (-in_dir).dot(plate_n).clamp(0.03, 1.0);
+                let angle_deg = cos_theta.acos().to_degrees();
+                let eff = shell.effective_armor_mm(
+                    hit.nominal_mm,
+                    angle_deg,
+                    hit.armor_type.multiplier(),
+                );
+                let pen = shell.penetration_at_speed(impact_speed);
+                let rico = shell.ricochet_chance(angle_deg, hit.nominal_mm);
+                (pen, eff, rico)
+            };
+
+            let indicator = if rico_chance >= 0.70 {
+                PenIndicator::Unlikely
+            } else if pen_mm >= eff_armor * 1.08 && rico_chance < 0.25 {
+                PenIndicator::Likely
+            } else if pen_mm >= eff_armor * 0.88 && rico_chance < 0.55 {
+                PenIndicator::Marginal
+            } else {
+                PenIndicator::Unlikely
+            };
+
+            Some(ArmorPenAssessment {
+                target_id: target.id,
+                target_name: target.state.config.name.clone(),
+                plate_name: hit.plate_name,
+                penetration_mm: pen_mm,
+                effective_armor_mm: eff_armor,
+                ricochet_chance: rico_chance,
+                indicator,
+            })
+        });
+
+        AimTelemetry {
+            bore_point,
+            distance_m,
+            ballistic_impact_point,
+            assessment,
+        }
+    }
+
     /// Advances the deterministic simulation by `dt` seconds.
     pub fn step_fixed(&mut self, dt: f32, player_input: TankInput) {
         self.tick += 1;
@@ -355,6 +513,8 @@ impl SimWorld {
         self.recent_shots.clear();
         self.recent_hit_reports.clear();
         self.recent_kills.clear();
+        self.recent_fpe_uses.clear();
+        self.recent_repairs_completed.clear();
 
         let team_battle = self.battle.mode == BattleMode::TeamBattle;
         let over = self.battle.is_over();
@@ -374,7 +534,7 @@ impl SimWorld {
             self.update_visibility();
         }
 
-        // 2. Ongoing internal crew replacement (6s) and fire burn-out ticks
+        // 2. Ongoing internal crew replacement (6s), field repairs, and fire burn-out ticks
         let mut ongoing_kills: Vec<(usize, TankId, Team, KillReason)> = Vec::new();
         if !over {
             for i in 0..n {
@@ -387,6 +547,8 @@ impl SimWorld {
                         .fire_instigator
                         .unwrap_or((self.tanks[i].id, self.tanks[i].team.opposite()));
                     ongoing_kills.push((i, killer_id, killer_team, reason));
+                } else if self.tanks[i].damage.repair_just_completed {
+                    self.recent_repairs_completed.push(self.tanks[i].id);
                 }
             }
         }
@@ -426,17 +588,25 @@ impl SimWorld {
             }
         }
 
-        // 4. Step every living tank with active module/crew damage modifiers & spawn AP shells
+        // 4. Process FPE & Field Repair requests, step every living tank with active damage modifiers & spawn shells
         for (i, input) in inputs.iter().enumerate().take(n) {
             if !self.tanks[i].alive {
                 continue;
             }
+            if input.use_fpe && self.tanks[i].damage.trigger_fpe() {
+                self.recent_fpe_uses.push(self.tanks[i].id);
+            }
+            if input.toggle_repair {
+                let speed = self.tanks[i].state.forward_speed;
+                self.tanks[i].damage.toggle_repair(speed);
+            }
             let mods = self.tanks[i].damage.mobility_modifiers();
-            if let Some(shot) =
+            if let Some(mut shot) =
                 self.tanks[i]
                     .state
                     .step_with_modifiers(dt, *input, &self.voxels, mods, &mut self.rng)
             {
+                shot.shooter_id = self.tanks[i].id;
                 let id = self.next_projectile_id;
                 self.next_projectile_id += 1;
                 self.projectiles.push(Projectile {

@@ -233,7 +233,7 @@ mod tests {
                 > 0
         );
 
-        // 3. Exercise Stage 4/5/7/8 shell switching, turret blow-off, active fire emitter, and WT damage HUD
+        // 3. Exercise Stage 4/5/7/8 shell switching, turret blow-off, active fire emitter, FPE, Field Repair, and WT damage HUD
         {
             let mut sim = app.world_mut().resource_mut::<SimResource>();
             assert_eq!(sim.0.map.id, "el_alamein");
@@ -243,18 +243,55 @@ mod tests {
             sim.0.tanks[6].alive = false;
             sim.0.tanks[6].damage.turret_blown_off = true;
             sim.0.tanks[0].damage.on_fire = true;
+            if let Some(engine) = sim.0.tanks[0]
+                .damage
+                .modules
+                .iter_mut()
+                .find(|m| m.kind == sim::ModuleKind::Engine)
+            {
+                engine.integrity = 0.0;
+            }
         }
-        // Switch player ammo slot to HE (last slot)
-        app.world_mut()
-            .resource_mut::<PlayerInputResource>()
-            .select_shell = Some(2);
+        // Switch player ammo slot to HE (last slot) and trigger FPE
+        {
+            let mut input = app.world_mut().resource_mut::<PlayerInputResource>();
+            input.select_shell = Some(2);
+            input.use_fpe_queued = true;
+        }
         for _ in 0..8 {
             app.update();
         }
-        assert_eq!(
-            app.world().resource::<SimResource>().0.player_tank().selected_shell_idx,
-            2,
-            "Player should be able to switch to slot 3 (HE) cleanly"
+        {
+            let sim = app.world().resource::<SimResource>();
+            assert_eq!(
+                sim.0.player_tank().selected_shell_idx,
+                2,
+                "Player should be able to switch to slot 3 (HE) cleanly"
+            );
+            assert!(
+                !sim.0.player_unit().damage.on_fire,
+                "FPE should extinguish the fire through TankGamePlugin"
+            );
+            assert_eq!(
+                sim.0.player_unit().damage.fpe_charges,
+                sim::FPE_MAX_CHARGES - 1
+            );
+        }
+        // Toggle Field Repair now that fire is out and engine is destroyed
+        app.world_mut()
+            .resource_mut::<PlayerInputResource>()
+            .toggle_repair_queued = true;
+        for _ in 0..4 {
+            app.update();
+        }
+        assert!(
+            app.world()
+                .resource::<SimResource>()
+                .0
+                .player_unit()
+                .damage
+                .repairing,
+            "Field Repair should activate for a destroyed engine"
         );
 
         // 4. Verify Update 0.1 Economy settles once when battle ends with Allied Victory

@@ -56,7 +56,7 @@ impl EconomyResource {
         }
     }
 
-    /// Loads saved profile from `~/.carbon_armor_profile.txt` on native builds, or starts fresh on WASM.
+    /// Loads saved profile from `~/.carbon_armor_profile.txt` (native) or `localStorage` (WASM).
     pub fn load_or_default() -> Self {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -78,7 +78,21 @@ impl EconomyResource {
         }
         #[cfg(target_arch = "wasm32")]
         {
-            Self::new_in_memory()
+            if let Some(storage) = web_sys::window().and_then(|w| w.local_storage().ok().flatten())
+                && let Ok(Some(text)) = storage.get_item(Self::WASM_STORAGE_KEY)
+                && let Some(profile) = PlayerProfile::from_save_text(&text)
+            {
+                return Self {
+                    profile,
+                    last_reward: None,
+                    settled_this_battle: false,
+                    status_notice: "BROWSER PROFILE LOADED | READY FOR BATTLE".to_string(),
+                    persist_to_disk: true,
+                };
+            }
+            let mut res = Self::new_in_memory();
+            res.persist_to_disk = true;
+            res
         }
     }
 
@@ -89,7 +103,16 @@ impl EconomyResource {
         {
             let _ = std::fs::write(path, self.profile.to_save_text());
         }
+        #[cfg(target_arch = "wasm32")]
+        if self.persist_to_disk
+            && let Some(storage) = web_sys::window().and_then(|w| w.local_storage().ok().flatten())
+        {
+            let _ = storage.set_item(Self::WASM_STORAGE_KEY, &self.profile.to_save_text());
+        }
     }
+
+    #[cfg(target_arch = "wasm32")]
+    const WASM_STORAGE_KEY: &'static str = "carbon_armor_profile_v1";
 
     #[cfg(not(target_arch = "wasm32"))]
     fn save_path() -> Option<std::path::PathBuf> {

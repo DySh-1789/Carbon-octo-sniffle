@@ -22,6 +22,10 @@ pub const MIN_OPERATIONAL_CREW: usize = 2;
 pub const FIRE_BURNOUT_TIME: f32 = 14.0;
 /// Reload time multiplier when the Loader seat is vacant.
 pub const NO_LOADER_RELOAD_MULT: f32 = 1.8;
+/// Number of Fire Prevention Equipment (FPE) charges carried into battle.
+pub const FPE_MAX_CHARGES: u8 = 2;
+/// Cooldown in seconds between FPE activations.
+pub const FPE_COOLDOWN_SECS: f32 = 3.0;
 
 /// Armor metallurgy resistance modifier.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -368,11 +372,13 @@ impl CrewMemberState {
     }
 }
 
-/// Complete War Thunder internal state of a single tank (modules, crew, transfers, fire, turret pop).
+/// Complete War Thunder internal state of a single tank (modules, crew, transfers, fire, FPE, repair, turret pop).
 #[derive(Clone, Debug)]
 pub struct TankDamageState {
     pub modules: Vec<ModuleState>,
     pub crew: Vec<CrewMemberState>,
+    /// True for casemate tank destroyers (ensures replacement Gunner sits inside hull frame).
+    pub is_casemate: bool,
     /// Countdown (seconds) while a spare crewman moves to replace a knocked-out Driver.
     pub driver_transfer_timer: f32,
     /// Countdown (seconds) while a spare crewman moves to replace a knocked-out Gunner.
@@ -380,6 +386,18 @@ pub struct TankDamageState {
     pub on_fire: bool,
     pub fire_elapsed: f32,
     fire_tick_accum: f32,
+    /// Remaining Fire Prevention Equipment (`[6]`) extinguisher charges.
+    pub fpe_charges: u8,
+    /// Cooldown in seconds before another FPE charge can be triggered.
+    pub fpe_cooldown: f32,
+    /// True while the crew is actively performing field repairs (`[F]`).
+    pub repairing: bool,
+    /// Seconds remaining until the active field repair completes.
+    pub repair_remaining: f32,
+    /// Total duration of the current field repair job (for HUD progress bar).
+    pub repair_total: f32,
+    /// Transient flag set for one tick when a field repair completes.
+    pub repair_just_completed: bool,
     /// True if ammo-rack detonation blew the turret off the hull.
     pub turret_blown_off: bool,
     /// Total hits received (used by AI to react defensively without an HP bar).
@@ -573,11 +591,18 @@ impl TankDamageState {
         Self {
             modules,
             crew,
+            is_casemate: profile.is_casemate,
             driver_transfer_timer: 0.0,
             gunner_transfer_timer: 0.0,
             on_fire: false,
             fire_elapsed: 0.0,
             fire_tick_accum: 0.0,
+            fpe_charges: FPE_MAX_CHARGES,
+            fpe_cooldown: 0.0,
+            repairing: false,
+            repair_remaining: 0.0,
+            repair_total: 0.0,
+            repair_just_completed: false,
             turret_blown_off: false,
             damage_events_received: 0,
             fire_instigator: None,
@@ -609,6 +634,96 @@ impl TankDamageState {
             .unwrap_or(ModuleHealth::Intact)
     }
 
+    /// True if any repairable module (tracks, engine, transmission, barrel, breech, turret ring, fuel tank)
+    /// is currently damaged or destroyed.
+    pub fn needs_repair(&self) -> bool {
+        self.modules
+            .iter()
+            .any(|m| m.kind != ModuleKind::AmmoRack && m.health() != ModuleHealth::Intact)
+    }
+
+    /// True if a critical combat module (gun or drive) is currently destroyed.
+    pub fn has_critical_module_destroyed(&self) -> bool {
+        self.modules.iter().any(|m| {
+            matches!(
+                m.kind,
+                ModuleKind::LeftTrack
+                    | ModuleKind::RightTrack
+                    | ModuleKind::Engine
+                    | ModuleKind::Transmission
+                    | ModuleKind::GunBarrel
+                    | ModuleKind::GunBreech
+                    | ModuleKind::TurretRing
+            ) && m.health() == ModuleHealth::Destroyed
+        })
+    }
+
+    /// Triggers Fire Prevention Equipment (`[6]`) to extinguish an active compartment fire.
+    /// Returns `true` if a fire was extinguished.
+    pub fn trigger_fpe(&mut self) -> bool {
+        if !self.on_fire || self.fpe_charges == 0 || self.fpe_cooldown > 0.0 {
+            return false;
+        }
+        self.on_fire = false;
+        self.fire_elapsed = 0.0;
+        self.fire_tick_accum = 0.0;
+        self.fire_instigator = None;
+        self.fpe_charges -= 1;
+        self.fpe_cooldown = FPE_COOLDOWN_SECS;
+        true
+    }
+
+    /// Starts or cancels a War Thunder-style field repair (`[F]`).
+    /// Requires the vehicle to be nearly stationary (`|v| < 3.0 m/s`) and not actively on fire.
+    /// Returns `true` if a repair job was started.
+    pub fn toggle_repair(&mut self, forward_speed_mps: f32) -> bool {
+        if self.repairing {
+            self.cancel_repair();
+            return false;
+        }
+        if self.on_fire || !self.needs_repair() || forward_speed_mps.abs() > 3.0 {
+            return false;
+        }
+        let mut secs = 0.0f32;
+        for m in &self.modules {
+            if m.kind == ModuleKind::AmmoRack {
+                continue;
+            }
+            let h = m.health();
+            if h == ModuleHealth::Intact {
+                continue;
+            }
+            let base = match m.kind {
+                ModuleKind::LeftTrack | ModuleKind::RightTrack => 4.5,
+                ModuleKind::GunBarrel | ModuleKind::GunBreech => 6.0,
+                ModuleKind::Engine | ModuleKind::Transmission => 6.5,
+                ModuleKind::TurretRing => 5.0,
+                ModuleKind::FuelTank => 3.5,
+                ModuleKind::AmmoRack => 0.0,
+            };
+            secs += if h == ModuleHealth::Destroyed {
+                base
+            } else {
+                base * 0.45
+            };
+        }
+        // Fewer surviving crew members slow field repairs down realistically
+        let crew_ratio = (self.alive_crew_count() as f32 / self.total_crew_count().max(1) as f32)
+            .clamp(0.45, 1.0);
+        let total = (secs / crew_ratio).clamp(4.0, 14.0);
+        self.repairing = true;
+        self.repair_total = total;
+        self.repair_remaining = total;
+        true
+    }
+
+    /// Cancels an in-progress field repair.
+    pub fn cancel_repair(&mut self) {
+        self.repairing = false;
+        self.repair_remaining = 0.0;
+        self.repair_total = 0.0;
+    }
+
     /// Computes live driving, traverse, reload, and firing modifiers from module & crew damage.
     pub fn mobility_modifiers(&self) -> DamageModifiers {
         let mut mods = DamageModifiers::intact();
@@ -621,8 +736,9 @@ impl TankDamageState {
         let breech = self.module_worst_health(ModuleKind::GunBreech);
         let barrel = self.module_worst_health(ModuleKind::GunBarrel);
 
-        // 1. Mobility (driver, engine, transmission, tracks)
-        if !self.has_active_seat(CrewRole::Driver)
+        // 1. Mobility (driver, engine, transmission, tracks, or active field repair lock)
+        if self.repairing
+            || !self.has_active_seat(CrewRole::Driver)
             || engine == ModuleHealth::Destroyed
             || trans == ModuleHealth::Destroyed
             || (left_trk == ModuleHealth::Destroyed && right_trk == ModuleHealth::Destroyed)
@@ -715,11 +831,17 @@ impl TankDamageState {
         }
     }
 
-    /// Advances crew-replacement timers and ongoing fire damage. Returns `Some(KillReason)` if
-    /// the tank is destroyed this tick (fire burn-out, fire-induced ammo detonation, or `< 2` crew).
+    /// Advances crew-replacement timers, FPE cooldown, field repairs, and ongoing fire damage.
+    /// Returns `Some(KillReason)` if the tank is destroyed this tick (fire burn-out, fire-induced
+    /// ammo detonation, or `< 2` crew).
     pub fn tick_ongoing(&mut self, dt: f32, rng: &mut SimRng) -> Option<KillReason> {
+        self.repair_just_completed = false;
         if self.alive_crew_count() < MIN_OPERATIONAL_CREW {
             return Some(KillReason::CrewKnockedOut);
+        }
+
+        if self.fpe_cooldown > 0.0 {
+            self.fpe_cooldown = (self.fpe_cooldown - dt).max(0.0);
         }
 
         // 1. Crew replacement timers (6.0 s)
@@ -744,8 +866,11 @@ impl TankDamageState {
             }
         }
 
-        // 2. Ongoing fire burn-out tick
+        // 2. Ongoing fire burn-out tick (aborts active field repairs if burning)
         if self.on_fire {
+            if self.repairing {
+                self.cancel_repair();
+            }
             self.fire_elapsed += dt;
             self.fire_tick_accum += dt;
             while self.fire_tick_accum >= 1.0 {
@@ -770,7 +895,9 @@ impl TankDamageState {
                     }
                 }
                 if ammo_detonated {
-                    self.turret_blown_off = true;
+                    if !self.is_casemate {
+                        self.turret_blown_off = true;
+                    }
                     return Some(KillReason::AmmoRackDetonation);
                 }
 
@@ -786,6 +913,22 @@ impl TankDamageState {
             }
             if self.fire_elapsed >= FIRE_BURNOUT_TIME {
                 return Some(KillReason::BurnedOut);
+            }
+        }
+
+        // 3. Active field repair countdown
+        if self.repairing {
+            self.repair_remaining = (self.repair_remaining - dt).max(0.0);
+            if self.repair_remaining <= 0.0 {
+                for m in &mut self.modules {
+                    if m.kind != ModuleKind::AmmoRack && m.health() != ModuleHealth::Intact {
+                        // Restore field-repaired modules to operational integrity
+                        m.integrity = m.integrity.max(m.max_integrity * 0.80);
+                    }
+                }
+                self.repairing = false;
+                self.repair_total = 0.0;
+                self.repair_just_completed = true;
             }
         }
 
@@ -817,11 +960,21 @@ impl TankDamageState {
                 Vec3::new(-0.72, 0.42, -1.58),
                 Vec3::new(-0.14, 1.25, -0.92),
             ),
-            CrewRole::Gunner => (
-                PartFrame::Turret,
-                Vec3::new(-0.76, 0.06, -0.78),
-                Vec3::new(-0.26, 0.86, -0.10),
-            ),
+            CrewRole::Gunner => {
+                if self.is_casemate {
+                    (
+                        PartFrame::Hull,
+                        Vec3::new(-0.76, 0.85, -0.78),
+                        Vec3::new(-0.26, 1.65, -0.10),
+                    )
+                } else {
+                    (
+                        PartFrame::Turret,
+                        Vec3::new(-0.76, 0.06, -0.78),
+                        Vec3::new(-0.26, 0.86, -0.10),
+                    )
+                }
+            }
             _ => return,
         };
         let c = &mut self.crew[idx];
@@ -830,6 +983,39 @@ impl TankDamageState {
         c.box_min = bmin;
         c.box_max = bmax;
     }
+}
+
+/// Color-coded War Thunder armor penetration indicator for the player's gun reticle.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum PenIndicator {
+    /// Penetration comfortably exceeds effective armor with low ricochet probability (Green).
+    Likely,
+    /// Borderline penetration or moderate ricochet risk (Yellow/Amber).
+    Marginal,
+    /// Armor will likely stop or ricochet the currently chambered shell (Red).
+    Unlikely,
+}
+
+/// Live armor penetration evaluation when aiming at an enemy tank.
+#[derive(Clone, Debug)]
+pub struct ArmorPenAssessment {
+    pub target_id: TankId,
+    pub target_name: String,
+    pub plate_name: &'static str,
+    pub penetration_mm: f32,
+    pub effective_armor_mm: f32,
+    pub ricochet_chance: f32,
+    pub indicator: PenIndicator,
+}
+
+/// Live gun-bore telemetry (rangefinder distance, ballistic drop point, and armor penetration preview).
+#[derive(Clone, Debug)]
+pub struct AimTelemetry {
+    pub bore_point: Vec3,
+    pub distance_m: f32,
+    /// Predicted shell impact point accounting for gravity & aerodynamic drag of the active shell.
+    pub ballistic_impact_point: Vec3,
+    pub assessment: Option<ArmorPenAssessment>,
 }
 
 /// Result of raycasting against a tank's exterior armor profile.

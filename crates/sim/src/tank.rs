@@ -120,6 +120,10 @@ pub struct TankInput {
     pub fire: bool,
     /// Optional shell slot selection (`0`, `1`, `2`).
     pub select_shell: Option<usize>,
+    /// Trigger Fire Prevention Equipment (`[6]`) if on fire.
+    pub use_fpe: bool,
+    /// Start or cancel Field Repair Kit (`[F]`).
+    pub toggle_repair: bool,
 }
 
 impl Default for TankInput {
@@ -130,6 +134,8 @@ impl Default for TankInput {
             aim_world_point: Vec3::new(0.0, 2.0, -100.0),
             fire: false,
             select_shell: None,
+            use_fpe: false,
+            toggle_repair: false,
         }
     }
 }
@@ -137,6 +143,7 @@ impl Default for TankInput {
 /// Spawn parameters emitted when a tank successfully fires its main cannon.
 #[derive(Clone, Debug)]
 pub struct FiredShot {
+    pub shooter_id: crate::battle::TankId,
     pub muzzle_position: Vec3,
     pub direction: Vec3,
     pub velocity: Vec3,
@@ -495,6 +502,7 @@ impl TankState {
             }
             let hull_vel = horiz_fwd * self.forward_speed;
             return Some(FiredShot {
+                shooter_id: crate::battle::TankId(0),
                 muzzle_position: self.muzzle_world_position(),
                 direction: dir,
                 velocity: dir * fired_shell.muzzle_velocity + hull_vel,

@@ -1,30 +1,48 @@
 use std::collections::HashMap;
 
 use bevy::prelude::*;
-use sim::{HitOutcome, KillReason};
+use sim::{HitOutcome, KillReason, MapId, ShellKind, Team};
 use voxel::VoxelId;
 
 use crate::bridge::{PendingSimEvents, SimResource, to_bevy_vec3};
 use crate::camera::MainTankCamera;
-use crate::state::AppState;
+use crate::state::{AppState, BattleEntity};
 
 /// Maximum camera distance for spawning dynamic transient `PointLight`s (keeps WebGL2/WGPU light clusters lean).
 const MAX_DYNAMIC_LIGHT_DIST_SQ: f32 = 95.0 * 95.0;
+/// Maximum camera distance for track dust & water spray puffs.
+const MAX_TRACK_DUST_DIST_SQ: f32 = 72.0 * 72.0;
 
 #[derive(Resource)]
 struct EffectsAssets {
     tracer_mesh: Handle<Mesh>,
     tracer_mat: Handle<StandardMaterial>,
+    he_tracer_mat: Handle<StandardMaterial>,
+    ap_tracer_mat: Handle<StandardMaterial>,
     puff_mesh: Handle<Mesh>,
+    beacon_post_mesh: Handle<Mesh>,
     flash_mat: Handle<StandardMaterial>,
     fire_mat: Handle<StandardMaterial>,
     spark_mat: Handle<StandardMaterial>,
     smoke_mat: Handle<StandardMaterial>,
     wreck_smoke_mat: Handle<StandardMaterial>,
     dirt_mat: Handle<StandardMaterial>,
+    sand_dust_mat: Handle<StandardMaterial>,
+    snow_dust_mat: Handle<StandardMaterial>,
+    water_spray_mat: Handle<StandardMaterial>,
+    fpe_foam_mat: Handle<StandardMaterial>,
     brick_debris_mat: Handle<StandardMaterial>,
     rubble_debris_mat: Handle<StandardMaterial>,
     wood_debris_mat: Handle<StandardMaterial>,
+    zone_neutral_mat: Handle<StandardMaterial>,
+    zone_allies_mat: Handle<StandardMaterial>,
+    zone_axis_mat: Handle<StandardMaterial>,
+    zone_contested_mat: Handle<StandardMaterial>,
+}
+
+#[derive(Component, Copy, Clone)]
+struct ZoneBeaconMarker {
+    zone_idx: usize,
 }
 
 #[derive(Resource, Default)]
@@ -34,6 +52,11 @@ struct TracerEntities {
 
 #[derive(Resource, Default)]
 struct FireEmitTimer {
+    accum: f32,
+}
+
+#[derive(Resource, Default)]
+struct DustEmitTimer {
     accum: f32,
 }
 
@@ -60,15 +83,19 @@ impl Plugin for EffectsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<TracerEntities>()
             .init_resource::<FireEmitTimer>()
+            .init_resource::<DustEmitTimer>()
             .add_systems(Startup, setup_effects_assets)
+            .add_systems(OnEnter(AppState::InBattle), spawn_capture_zone_beacons)
             .add_systems(OnExit(AppState::InBattle), clear_effects_on_exit)
             .add_systems(
                 Update,
                 (
                     clear_effects_on_restart,
                     sync_projectile_tracers,
+                    sync_capture_zone_beacons,
                     spawn_shot_and_impact_effects,
                     emit_active_tank_fire_effects,
+                    emit_track_dust_and_water_effects,
                     tick_transient_effects,
                 )
                     .chain()
@@ -81,6 +108,7 @@ fn clear_effects_on_exit(
     mut commands: Commands,
     mut tracers: ResMut<TracerEntities>,
     mut fire_timer: ResMut<FireEmitTimer>,
+    mut dust_timer: ResMut<DustEmitTimer>,
     particle_q: Query<Entity, With<TransientParticle>>,
     light_q: Query<Entity, With<TransientLight>>,
 ) {
@@ -94,6 +122,7 @@ fn clear_effects_on_exit(
         commands.entity(entity).despawn();
     }
     fire_timer.accum = 0.0;
+    dust_timer.accum = 0.0;
 }
 
 fn setup_effects_assets(
@@ -108,7 +137,20 @@ fn setup_effects_assets(
         unlit: true,
         ..default()
     });
+    let he_tracer_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(1.0, 0.45, 0.18),
+        emissive: LinearRgba::new(16.0, 4.2, 0.6, 1.0),
+        unlit: true,
+        ..default()
+    });
+    let ap_tracer_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(1.0, 0.96, 0.72),
+        emissive: LinearRgba::new(14.0, 12.0, 5.0, 1.0),
+        unlit: true,
+        ..default()
+    });
     let puff_mesh = meshes.add(Cuboid::new(1.0, 1.0, 1.0));
+    let beacon_post_mesh = meshes.add(Cuboid::new(0.22, 2.2, 0.22));
     let flash_mat = materials.add(StandardMaterial {
         base_color: Color::srgb(1.0, 0.65, 0.18),
         emissive: LinearRgba::new(10.0, 4.5, 0.8, 1.0),
@@ -142,6 +184,26 @@ fn setup_effects_assets(
         perceptual_roughness: 0.95,
         ..default()
     });
+    let sand_dust_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.76, 0.65, 0.45),
+        perceptual_roughness: 0.98,
+        ..default()
+    });
+    let snow_dust_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.86, 0.90, 0.95),
+        perceptual_roughness: 0.96,
+        ..default()
+    });
+    let water_spray_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.72, 0.88, 0.96),
+        perceptual_roughness: 0.65,
+        ..default()
+    });
+    let fpe_foam_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.92, 0.95, 0.98),
+        perceptual_roughness: 0.85,
+        ..default()
+    });
     let brick_debris_mat = materials.add(StandardMaterial {
         base_color: Color::srgb(0.66, 0.28, 0.20),
         perceptual_roughness: 0.90,
@@ -157,20 +219,55 @@ fn setup_effects_assets(
         perceptual_roughness: 0.90,
         ..default()
     });
+    let zone_neutral_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.95, 0.84, 0.32),
+        emissive: LinearRgba::new(2.6, 2.0, 0.45, 1.0),
+        unlit: true,
+        ..default()
+    });
+    let zone_allies_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.28, 0.68, 1.0),
+        emissive: LinearRgba::new(0.45, 2.2, 4.5, 1.0),
+        unlit: true,
+        ..default()
+    });
+    let zone_axis_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(1.0, 0.30, 0.26),
+        emissive: LinearRgba::new(4.5, 0.55, 0.40, 1.0),
+        unlit: true,
+        ..default()
+    });
+    let zone_contested_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(1.0, 0.64, 0.16),
+        emissive: LinearRgba::new(4.2, 1.8, 0.25, 1.0),
+        unlit: true,
+        ..default()
+    });
 
     commands.insert_resource(EffectsAssets {
         tracer_mesh,
         tracer_mat,
+        he_tracer_mat,
+        ap_tracer_mat,
         puff_mesh,
+        beacon_post_mesh,
         flash_mat,
         fire_mat,
         spark_mat,
         smoke_mat,
         wreck_smoke_mat,
         dirt_mat,
+        sand_dust_mat,
+        snow_dust_mat,
+        water_spray_mat,
+        fpe_foam_mat,
         brick_debris_mat,
         rubble_debris_mat,
         wood_debris_mat,
+        zone_neutral_mat,
+        zone_allies_mat,
+        zone_axis_mat,
+        zone_contested_mat,
     });
 }
 
@@ -228,10 +325,15 @@ fn sync_projectile_tracers(
                 tf.rotation = rot;
             }
         } else {
+            let mat = match proj.shell.kind {
+                ShellKind::He => assets.he_tracer_mat.clone(),
+                ShellKind::Ap => assets.ap_tracer_mat.clone(),
+                ShellKind::Aphe | ShellKind::Aphebc | ShellKind::Apcbc => assets.tracer_mat.clone(),
+            };
             let entity = commands
                 .spawn((
                     Mesh3d(assets.tracer_mesh.clone()),
-                    MeshMaterial3d(assets.tracer_mat.clone()),
+                    MeshMaterial3d(mat),
                     Transform::from_translation(pos).with_rotation(rot),
                 ))
                 .id();
@@ -240,8 +342,62 @@ fn sync_projectile_tracers(
     }
 }
 
+/// Spawns lightweight 3D tactical perimeter beacons around each capture zone (A / B / C)
+/// that tint live in Blue (Allies), Red (Axis), Gold (Neutral), or Amber (Contested).
+fn spawn_capture_zone_beacons(
+    mut commands: Commands,
+    sim: Res<SimResource>,
+    assets: Res<EffectsAssets>,
+) {
+    const POSTS_PER_ZONE: usize = 8;
+    for (zone_idx, zone) in sim.0.battle.zones.iter().enumerate() {
+        for p in 0..POSTS_PER_ZONE {
+            let angle = p as f32 * std::f32::consts::TAU / POSTS_PER_ZONE as f32;
+            let wx = zone.center.x + angle.cos() * zone.radius;
+            let wz = zone.center.z + angle.sin() * zone.radius;
+            let wy = sim
+                .0
+                .voxels
+                .surface_height_at(wx, wz)
+                .unwrap_or(zone.center.y);
+            commands.spawn((
+                BattleEntity,
+                ZoneBeaconMarker { zone_idx },
+                Mesh3d(assets.beacon_post_mesh.clone()),
+                MeshMaterial3d(assets.zone_neutral_mat.clone()),
+                Transform::from_xyz(wx, wy + 1.1, wz),
+            ));
+        }
+    }
+}
+
+fn sync_capture_zone_beacons(
+    sim: Res<SimResource>,
+    assets: Res<EffectsAssets>,
+    mut q: Query<(&ZoneBeaconMarker, &mut MeshMaterial3d<StandardMaterial>)>,
+) {
+    for (marker, mut mat) in &mut q {
+        let Some(zone) = sim.0.battle.zones.get(marker.zone_idx) else {
+            continue;
+        };
+        let desired = if zone.contested {
+            &assets.zone_contested_mat
+        } else {
+            match zone.owner {
+                Some(Team::Allies) => &assets.zone_allies_mat,
+                Some(Team::Axis) => &assets.zone_axis_mat,
+                None => &assets.zone_neutral_mat,
+            }
+        };
+        if mat.0 != *desired {
+            mat.0 = desired.clone();
+        }
+    }
+}
+
 fn spawn_shot_and_impact_effects(
     mut commands: Commands,
+    sim: Res<SimResource>,
     pending: Res<PendingSimEvents>,
     assets: Res<EffectsAssets>,
     cam_q: Query<&Transform, With<MainTankCamera>>,
@@ -615,6 +771,35 @@ fn spawn_shot_and_impact_effects(
             }
         }
     }
+
+    // 4. Fire Prevention Equipment (FPE) white CO2/foam burst on engine deck
+    for &tank_id in &pending.fpe_uses {
+        let Some(unit) = sim.0.tanks.get(tank_id.index()) else {
+            continue;
+        };
+        let origin = to_bevy_vec3(unit.state.position)
+            + Quat::from_rotation_y(unit.state.hull_yaw) * Vec3::new(0.0, 1.4, 1.25);
+        for i in 0..8 {
+            let angle = i as f32 * std::f32::consts::TAU / 8.0;
+            commands.spawn((
+                Mesh3d(assets.puff_mesh.clone()),
+                MeshMaterial3d(assets.fpe_foam_mat.clone()),
+                Transform::from_translation(origin).with_scale(Vec3::splat(0.42)),
+                TransientParticle {
+                    velocity: Vec3::new(
+                        angle.cos() * 2.8,
+                        2.6 + (i % 3) as f32 * 0.8,
+                        angle.sin() * 2.8,
+                    ),
+                    gravity: -0.5,
+                    age: 0.0,
+                    lifetime: 0.72 + (i % 3) as f32 * 0.14,
+                    start_scale: 0.44,
+                    end_scale: 1.55,
+                },
+            ));
+        }
+    }
 }
 
 /// Continuously emits voxel flames and black smoke from burning tanks (active engine/fuel fire).
@@ -675,6 +860,73 @@ fn emit_active_tank_fire_effects(
                 end_scale: 2.35,
             },
         ));
+    }
+}
+
+/// Emits lightweight biome-matched track dust plumes or river-fording water splashes behind fast tanks.
+fn emit_track_dust_and_water_effects(
+    mut commands: Commands,
+    time: Res<Time>,
+    sim: Res<SimResource>,
+    assets: Res<EffectsAssets>,
+    mut timer: ResMut<DustEmitTimer>,
+    cam_q: Query<&Transform, With<MainTankCamera>>,
+) {
+    timer.accum += time.delta_secs();
+    if timer.accum < 0.12 {
+        return;
+    }
+    timer.accum = 0.0;
+
+    let Some(cam_pos) = cam_q.single().ok().map(|tf| tf.translation) else {
+        return;
+    };
+    let map_dust_mat = match MapId::from_id(&sim.0.map.id) {
+        Some(MapId::ElAlamein) => &assets.sand_dust_mat,
+        Some(MapId::StalingradWinter) => &assets.snow_dust_mat,
+        _ => &assets.dirt_mat,
+    };
+
+    for unit in &sim.0.tanks {
+        if !unit.alive || unit.state.forward_speed.abs() < 3.4 {
+            continue;
+        }
+        let pos = to_bevy_vec3(unit.state.position);
+        if pos.distance_squared(cam_pos) > MAX_TRACK_DUST_DIST_SQ {
+            continue;
+        }
+        let in_water = unit.state.is_on_water(&sim.0.voxels);
+        let mat = if in_water {
+            assets.water_spray_mat.clone()
+        } else {
+            map_dust_mat.clone()
+        };
+        let rot = Quat::from_rotation_y(unit.state.hull_yaw);
+        let rear_z = if unit.state.forward_speed >= 0.0 {
+            unit.state.config.hull_half_length * 0.85
+        } else {
+            -unit.state.config.hull_half_length * 0.85
+        };
+        let track_x = (unit.state.config.hull_half_width - 0.15).max(1.0);
+        let speed_scale = (unit.state.forward_speed.abs() / 12.0).clamp(0.45, 1.25);
+
+        for side in [-1.0f32, 1.0f32] {
+            let spawn_p = pos + rot * Vec3::new(side * track_x, 0.25, rear_z);
+            let out_v = rot * Vec3::new(side * 0.9, if in_water { 2.4 } else { 1.3 }, rear_z.signum() * 1.4);
+            commands.spawn((
+                Mesh3d(assets.puff_mesh.clone()),
+                MeshMaterial3d(mat.clone()),
+                Transform::from_translation(spawn_p).with_scale(Vec3::splat(0.26 * speed_scale)),
+                TransientParticle {
+                    velocity: out_v * speed_scale,
+                    gravity: if in_water { 6.5 } else { 0.4 },
+                    age: 0.0,
+                    lifetime: if in_water { 0.42 } else { 0.62 },
+                    start_scale: 0.28 * speed_scale,
+                    end_scale: (if in_water { 0.55 } else { 0.95 }) * speed_scale,
+                },
+            ));
+        }
     }
 }
 
