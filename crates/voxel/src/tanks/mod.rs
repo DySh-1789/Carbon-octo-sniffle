@@ -664,15 +664,23 @@ pub fn draw_engine_grilles(
 /// Draws a cylindrical commander cupola with dark vision ports around its rim.
 pub fn draw_cupola(c: &mut TankCanvas, p: &TankPalette, cx: f32, cz: f32, y_base: i32, h: i32, r: f32) {
     c.fill_ellipse_y(cx, cz, r, r, y_base, y_base + h - 1, p.dark);
-    // Vision slit band near top
+    // Vision slit band near top, clamped cleanly onto the cylinder's outer rim
     let slit_y = y_base + h - 1;
     let ix = cx.round() as i32;
     let iz = cz.round() as i32;
-    let ir = r.round() as i32;
-    c.set(ix, slit_y, iz - ir, p.optic);
-    c.set(ix + ir, slit_y, iz, p.black);
-    c.set(ix - ir, slit_y, iz, p.black);
-    c.set(ix, slit_y, iz + ir, p.black);
+    let r2 = (r * r).max(0.25);
+    let dx = ix as f32 - cx;
+    let dz = iz as f32 - cz;
+    let span_z = (r2 - dx * dx).max(0.0).sqrt();
+    let span_x = (r2 - dz * dz).max(0.0).sqrt();
+    let z_front = (cz - span_z).ceil() as i32;
+    let z_rear = (cz + span_z).floor() as i32;
+    let x_left = (cx - span_x).ceil() as i32;
+    let x_right = (cx + span_x).floor() as i32;
+    c.set(ix, slit_y, z_front, p.optic);
+    c.set(x_right, slit_y, iz, p.black);
+    c.set(x_left, slit_y, iz, p.black);
+    c.set(ix, slit_y, z_rear, p.black);
     // Hatch lid on top
     c.fill_ellipse_y(cx, cz, (r - 0.5).max(0.8), (r - 0.5).max(0.8), y_base + h, y_base + h, p.main);
 }

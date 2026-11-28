@@ -440,7 +440,7 @@ fn build_pz2c() -> TankVoxelModels {
     turret.set_sym(5, 3, -1, p.optic);
     turret.set_sym(5, 3, 2, p.trim);
     // Compact early-war commander hatch/cupola on turret rear roof
-    draw_cupola(&mut turret, &p, 0.0, 1.5, 6, 2, 2.3);
+    draw_cupola(&mut turret, &p, 0.0, 2.0, 6, 1, 1.5);
 
     // Armored front mantlet housing side-by-side 20mm KwK 30 + coaxial MG34
     turret.fill(-3, 1, -7, 3, 4, -6, p.dark);
@@ -552,8 +552,8 @@ fn build_pz3j() -> TankVoxelModels {
     // Rear Rommelkiste stowage box
     draw_rommelkiste(&mut turret, &p, 5, 1, 5, 10, 14);
 
-    // Tall cylindrical commander drum cupola
-    draw_cupola(&mut turret, &p, 0.0, 4.5, 7, 4, 3.0);
+    // Compact cylindrical commander drum cupola
+    draw_cupola(&mut turret, &p, 0.0, 4.0, 7, 2, 2.0);
 
     // 50mm KwK 38 L/42 barrel: len 22, thin, no muzzle brake
     let barrel = build_detailed_barrel(&p, 22, false, 4, MuzzleBrakeStyle::None);
@@ -663,8 +663,8 @@ fn build_pz4_f2() -> TankVoxelModels {
     // Oversized Pz.IV rear Rommelkiste stowage bin spanning nearly full turret rear
     draw_rommelkiste(&mut turret, &p, 7, 1, 5, 10, 16);
 
-    // Tall cylindrical commander drum cupola
-    draw_cupola(&mut turret, &p, 0.0, 4.5, 7, 4, 3.2);
+    // Compact cylindrical commander drum cupola
+    draw_cupola(&mut turret, &p, 0.0, 4.0, 7, 2, 2.0);
 
     // Unmistakable long 75mm KwK 40 L/43 barrel: len 34, thin, DoubleBaffle muzzle brake
     let barrel = build_detailed_barrel(&p, 34, false, 4, MuzzleBrakeStyle::DoubleBaffle);
@@ -738,7 +738,7 @@ fn build_stug3g() -> TankVoxelModels {
     draw_driver_visor(&mut hull, &p, -7, 12, -15, 1);
 
     // Commander's periscope cupola on LEFT roof (low profile StuG III G cupola)
-    draw_cupola(&mut hull, &p, -5.5, 1.5, 17, 3, 2.5);
+    draw_cupola(&mut hull, &p, -5.5, 1.5, 17, 1, 1.8);
 
     // Iconic FOLDING MG34 ARMORED SHIELD + loader's hatch on RIGHT roof
     hull.fill(2, 17, 2, 7, 17, 6, p.dark); // Loader hatch frame
@@ -891,8 +891,8 @@ fn build_tiger_h1() -> TankVoxelModels {
     // Rear curved turret stowage bin (Rommelkiste)
     draw_rommelkiste(&mut turret, &p, 7, 1, 6, 11, 15);
 
-    // Tall iconic cylindrical Tiger H1 drum cupola on LEFT + loader hatch on right
-    draw_cupola(&mut turret, &p, -6.0, 3.0, 8, 5, 3.2);
+    // Compact cylindrical Tiger H1 drum cupola on LEFT + loader hatch on right
+    draw_cupola(&mut turret, &p, -6.0, 3.0, 8, 2, 2.2);
     turret.fill_ellipse_y(5.0, 2.0, 2.2, 2.2, 8, 8, p.dark);
 
     // Thick 88mm KwK 36 L/56 barrel: len 42, thick, DoubleBaffle muzzle brake
@@ -991,8 +991,8 @@ fn build_panther_a() -> TankVoxelModels {
     turret.set(-2, 5, -13, p.optic);
     turret.set(3, 4, -13, p.black);
 
-    // Tall cylindrical cast Panther Ausf. A commander cupola on LEFT
-    draw_cupola(&mut turret, &p, -4.5, 4.5, 9, 4, 3.0);
+    // Compact cylindrical cast Panther Ausf. A commander cupola on LEFT
+    draw_cupola(&mut turret, &p, -4.5, 4.5, 9, 2, 2.0);
     // Circular rear turret escape hatch on back wall
     turret.fill_cyl_z(0.0, 4.0, 11, 12, 2.2, p.dark);
 
@@ -1113,7 +1113,7 @@ fn build_tiger2_h() -> TankVoxelModels {
     }
 
     // Sleek low-profile Tiger II commander cupola on LEFT + loader hatch on right
-    draw_cupola(&mut turret, &p, -4.5, 2.5, 9, 3, 2.9);
+    draw_cupola(&mut turret, &p, -4.5, 2.5, 9, 1, 2.0);
     turret.fill_ellipse_y(4.5, 1.5, 2.2, 2.2, 9, 9, p.dark);
     // Rear bustle escape hatch
     turret.fill(-3, 2, 18, 3, 6, 19, p.dark);
@@ -1205,8 +1205,8 @@ fn build_jagdtiger() -> TankVoxelModels {
     }
 
     // Twin roof periscope hatches + commander/loader hatches + gunner sight hood on casemate roof
-    draw_cupola(&mut hull, &p, -6.0, 3.0, 28, 2, 3.0);
-    draw_cupola(&mut hull, &p, 6.0, 3.0, 28, 2, 2.8);
+    draw_cupola(&mut hull, &p, -5.5, 3.5, 28, 1, 1.8);
+    draw_cupola(&mut hull, &p, 5.5, 3.5, 28, 1, 1.8);
     // Front gunner telescopic periscope hood
     hull.fill(-5, 28, -13, -3, 29, -11, p.dark);
     hull.set(-4, 29, -13, p.optic);
