@@ -17,7 +17,7 @@ pub use model::{
     VoxelTankBlueprint, build_basic_tank_models, build_tank_models,
 };
 pub use raycast::{VoxelHit, raycast_world};
-pub use tanks::{DETAIL_VOXEL_SIZE, build_vehicle_models};
+pub use tanks::{DETAIL_VOXEL_SIZE, MICRO_VOXEL_SIZE, build_vehicle_models};
 
 #[cfg(test)]
 mod tests {
@@ -242,5 +242,92 @@ mod tests {
         assert_eq!(world.get_voxel(IVec3::new(0, 3, -1)), VoxelId::BRICK);
         assert_eq!(world.get_voxel(IVec3::new(0, 1, -1)), VoxelId::GRASS);
         assert!(world.dirty_chunk_count() > 0);
+    }
+
+    #[test]
+    fn super_resolution_micro_detail_all_24_vehicles_verified() {
+        let reg = MaterialRegistry::new();
+        let all_ids = [
+            "us_m2a4",
+            "us_m3_stuart",
+            "us_m4a1",
+            "us_m10",
+            "us_m4a3e8",
+            "us_m4a3e2_76",
+            "us_m26",
+            "us_t34",
+            "de_pz2c",
+            "de_pz3j",
+            "de_pz4_f2",
+            "de_stug3g",
+            "de_tiger_h1",
+            "de_panther_a",
+            "de_tiger2_h",
+            "de_jagdtiger",
+            "su_bt5",
+            "su_t50",
+            "su_t34_41",
+            "su_kv1_zis5",
+            "su_t34_85",
+            "su_is2",
+            "su_t44_100",
+            "su_is3",
+        ];
+
+        for id in all_ids {
+            let m = build_vehicle_models(id).unwrap_or_else(|| panic!("missing {id}"));
+            assert!((m.hull.voxel_size - MICRO_VOXEL_SIZE).abs() < 1e-6);
+            assert!((m.turret.voxel_size - MICRO_VOXEL_SIZE).abs() < 1e-6);
+            assert!((m.barrel.voxel_size - MICRO_VOXEL_SIZE).abs() < 1e-6);
+
+            let hm = mesh_voxel_model(&m.hull, &reg);
+            let tm = mesh_voxel_model(&m.turret, &reg);
+            let bm = mesh_voxel_model(&m.barrel, &reg);
+            let total = hm.positions.len() + tm.positions.len() + bm.positions.len();
+
+            println!(
+                "{id:14} -> hull={:5} turret={:5} barrel={:4} total={:5} verts",
+                hm.positions.len(),
+                tm.positions.len(),
+                bm.positions.len(),
+                total
+            );
+
+            assert!(hm.positions.len() < u16::MAX as usize);
+            assert!(tm.positions.len() < u16::MAX as usize);
+            assert!(bm.positions.len() < u16::MAX as usize);
+            assert!(
+                total < u16::MAX as usize,
+                "{id} total vertices {total} exceeded u16::MAX"
+            );
+
+            // Verify micro-detail materials are actually present
+            let has_mat = |model: &VoxelModel, target: VoxelId| {
+                (0..model.size.y as i32).any(|y| {
+                    (0..model.size.z as i32).any(|z| {
+                        (0..model.size.x as i32).any(|x| model.get(IVec3::new(x, y, z)) == target)
+                    })
+                })
+            };
+            assert!(
+                has_mat(&m.hull, VoxelId::STEEL_BRIGHT)
+                    || has_mat(&m.turret, VoxelId::STEEL_BRIGHT)
+                    || has_mat(&m.barrel, VoxelId::STEEL_BRIGHT),
+                "{id} should contain bright steel micro-detail accents"
+            );
+            if matches!(
+                id,
+                "de_stug3g" | "de_tiger_h1" | "de_panther_a" | "de_tiger2_h" | "de_jagdtiger"
+            ) {
+                assert!(
+                    has_mat(&m.hull, VoxelId::ARMOR_CAMO_GREEN),
+                    "{id} should carry late-war 3-tone Olivgruen camo"
+                );
+                assert!(
+                    has_mat(&m.hull, VoxelId::ARMOR_CAMO_BROWN),
+                    "{id} should carry late-war 3-tone Schokoladenbraun camo"
+                );
+            }
+        }
     }
 }

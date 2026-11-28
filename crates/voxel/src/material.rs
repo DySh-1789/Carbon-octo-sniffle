@@ -62,6 +62,17 @@ impl VoxelId {
     pub const PINE_LEAVES: Self = Self(51);
     pub const GRANITE: Self = Self(52);
     pub const BUNKER_CONCRETE: Self = Self(53);
+    // High-detail 0.05 m vehicle micro-detail & weathering materials
+    pub const STEEL_BRIGHT: Self = Self(54);
+    pub const ARMOR_CAMO_GREEN: Self = Self(55);
+    pub const ARMOR_CAMO_BROWN: Self = Self(56);
+    pub const CANVAS_TARP: Self = Self(57);
+    pub const MUD_DUST: Self = Self(58);
+    pub const OPTIC_GLINT: Self = Self(59);
+    pub const ARMOR_US_LIGHT: Self = Self(60);
+    pub const ARMOR_DE_GREY_LIGHT: Self = Self(61);
+    pub const ARMOR_DE_TAN_LIGHT: Self = Self(62);
+    pub const ARMOR_SU_LIGHT: Self = Self(63);
 
     #[inline]
     pub const fn is_air(self) -> bool {
@@ -644,6 +655,106 @@ impl MaterialRegistry {
                 durability: 360.0,
                 blast_resistance: 16.0,
                 armor_equiv_mm: 95.0,
+                color_jitter: 0.0,
+            },
+            // 54: STEEL_BRIGHT (Bare polished gunmetal, bolt heads, sprocket teeth, tow cables)
+            VoxelMaterial {
+                name: "SteelBright",
+                base_color: [0.54, 0.56, 0.59, 1.0],
+                is_solid: true,
+                durability: 500.0,
+                blast_resistance: 20.0,
+                armor_equiv_mm: 80.0,
+                color_jitter: 0.0,
+            },
+            // 55: ARMOR_CAMO_GREEN (Wehrmacht RAL 6003 Olivgrün camo band)
+            VoxelMaterial {
+                name: "ArmorCamoGreen",
+                base_color: [0.24, 0.34, 0.21, 1.0],
+                is_solid: true,
+                durability: 500.0,
+                blast_resistance: 20.0,
+                armor_equiv_mm: 80.0,
+                color_jitter: 0.0,
+            },
+            // 56: ARMOR_CAMO_BROWN (Wehrmacht RAL 8017 Schokoladenbraun camo patch)
+            VoxelMaterial {
+                name: "ArmorCamoBrown",
+                base_color: [0.36, 0.22, 0.16, 1.0],
+                is_solid: true,
+                durability: 500.0,
+                blast_resistance: 20.0,
+                armor_equiv_mm: 80.0,
+                color_jitter: 0.0,
+            },
+            // 57: CANVAS_TARP (Rolled khaki field tarps, crew bedrolls, gun mantlet dust boot)
+            VoxelMaterial {
+                name: "CanvasTarp",
+                base_color: [0.49, 0.44, 0.31, 1.0],
+                is_solid: true,
+                durability: 80.0,
+                blast_resistance: 2.0,
+                armor_equiv_mm: 5.0,
+                color_jitter: 0.0,
+            },
+            // 58: MUD_DUST (Dried battlefield mud/earth on lower track splash guards)
+            VoxelMaterial {
+                name: "MudDust",
+                base_color: [0.31, 0.25, 0.18, 1.0],
+                is_solid: true,
+                durability: 100.0,
+                blast_resistance: 4.0,
+                armor_equiv_mm: 10.0,
+                color_jitter: 0.0,
+            },
+            // 59: OPTIC_GLINT (Anti-reflective cyan glass highlight on periscopes & visors)
+            VoxelMaterial {
+                name: "OpticGlint",
+                base_color: [0.42, 0.78, 0.94, 1.0],
+                is_solid: true,
+                durability: 60.0,
+                blast_resistance: 2.0,
+                armor_equiv_mm: 10.0,
+                color_jitter: 0.0,
+            },
+            // 60: ARMOR_US_LIGHT (Highlighted Olive Drab armor edge dry-brush)
+            VoxelMaterial {
+                name: "ArmorUSLight",
+                base_color: [0.39, 0.42, 0.28, 1.0],
+                is_solid: true,
+                durability: 500.0,
+                blast_resistance: 20.0,
+                armor_equiv_mm: 80.0,
+                color_jitter: 0.0,
+            },
+            // 61: ARMOR_DE_GREY_LIGHT (Highlighted Panzergrau armor edge dry-brush)
+            VoxelMaterial {
+                name: "ArmorDEGreyLight",
+                base_color: [0.35, 0.39, 0.44, 1.0],
+                is_solid: true,
+                durability: 500.0,
+                blast_resistance: 20.0,
+                armor_equiv_mm: 80.0,
+                color_jitter: 0.0,
+            },
+            // 62: ARMOR_DE_TAN_LIGHT (Highlighted Dunkelgelb armor edge dry-brush)
+            VoxelMaterial {
+                name: "ArmorDETanLight",
+                base_color: [0.68, 0.60, 0.40, 1.0],
+                is_solid: true,
+                durability: 500.0,
+                blast_resistance: 20.0,
+                armor_equiv_mm: 80.0,
+                color_jitter: 0.0,
+            },
+            // 63: ARMOR_SU_LIGHT (Highlighted 4BO Green armor edge dry-brush)
+            VoxelMaterial {
+                name: "ArmorSULight",
+                base_color: [0.32, 0.46, 0.25, 1.0],
+                is_solid: true,
+                durability: 500.0,
+                blast_resistance: 20.0,
+                armor_equiv_mm: 80.0,
                 color_jitter: 0.0,
             },
         ];

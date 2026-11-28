@@ -185,9 +185,9 @@ pub fn setup_tank_paint_materials(
 ) {
     let live_armor = materials.add(StandardMaterial {
         base_color: Color::WHITE,
-        perceptual_roughness: 0.62,
-        metallic: 0.24,
-        reflectance: 0.36,
+        perceptual_roughness: 0.54,
+        metallic: 0.28,
+        reflectance: 0.42,
         ..default()
     });
     let wreck_charred = materials.add(StandardMaterial {

@@ -2,6 +2,7 @@
 //! (8 USA, 8 Germany, 8 USSR), engineered for unmistakable frontal, side, and rear silhouettes.
 
 pub mod germany;
+pub mod refine;
 pub mod usa;
 pub mod ussr;
 
@@ -9,8 +10,9 @@ use glam::{IVec3, UVec3, Vec3};
 
 use crate::material::VoxelId;
 use crate::model::{MuzzleBrakeStyle, TankVoxelModels, VoxelModel};
+pub use refine::MICRO_VOXEL_SIZE;
 
-/// High-resolution tank voxel size (`0.10 m` = 10 cm voxels, 8x finer detail than `0.20 m`).
+/// Base sculptor grid size (`0.10 m`), refined automatically to `MICRO_VOXEL_SIZE` (`0.05 m`) on assembly.
 pub const DETAIL_VOXEL_SIZE: f32 = 0.10;
 
 /// National armor paint palette baked directly into tank voxels so white/red emblems,
@@ -393,10 +395,13 @@ pub fn build_running_gear(
     c.fill_sym(inner_x, fender_y - 1, z_rear + 1, outer_x + 1, fender_y - 1, z_rear + 1, p.dark);
 }
 
-/// Builds a crisp, detailed `0.10 m` gun barrel model with optional recoil sleeve, tapered tube,
-/// dark hollow bore shadow at tip, and authentic muzzle brake (`None`, `DoubleBaffle`, `TShaped`).
+/// Builds a crisp, super-detailed `0.05 m` (5 cm) gun barrel model with bolted recoil sleeve,
+/// tapered octagonal tube, bore evacuator on long heavy guns, dark recessed bore shadow,
+/// and hollow-vented authentic muzzle brake (`None`, `DoubleBaffle`, `TShaped`).
 ///
-/// The pivot is at `(0, 0, 0)` (gun trunnion) and the barrel extends forward along `-Z` to `-length`.
+/// `length` and `mantlet_collar_len` are specified in `0.10 m` base units (converted internally
+/// to `0.05 m` micro-voxels) so callers keep exact physical proportions.
+/// The pivot is at `(0, 0, 0)` (gun trunnion) and the barrel extends forward along `-Z`.
 pub fn build_detailed_barrel(
     p: &TankPalette,
     length: i32,
@@ -404,95 +409,200 @@ pub fn build_detailed_barrel(
     mantlet_collar_len: i32,
     brake: MuzzleBrakeStyle,
 ) -> VoxelModel {
-    let half_x = if thick { 3 } else { 2 };
-    let max_y = if thick { 7 } else { 5 };
-    let cy = max_y / 2;
-    let total_z = length + 4;
+    let len_hi = (length * 2).max(6);
+    let collar_hi = (mantlet_collar_len * 2).min(len_hi);
+    let half_x: i32 = if thick { 5 } else { 4 };
+    let half_y: i32 = if thick { 5 } else { 4 };
+    let total_z = len_hi + 8;
+
     let mut model = VoxelModel::new(
-        UVec3::new((half_x * 2 + 1) as u32, max_y as u32, total_z as u32),
-        Vec3::new(half_x as f32 + 0.5, cy as f32 + 0.5, (total_z - 2) as f32),
-        DETAIL_VOXEL_SIZE,
+        UVec3::new(
+            (half_x * 2 + 1) as u32,
+            (half_y * 2 + 1) as u32,
+            total_z as u32,
+        ),
+        Vec3::new(
+            half_x as f32 + 0.5,
+            half_y as f32 + 0.5,
+            (total_z - 3) as f32,
+        ),
+        MICRO_VOXEL_SIZE,
     );
 
     let set = |m: &mut VoxelModel, x: i32, y: i32, z_from_trunnion: i32, id: VoxelId| {
         // z_from_trunnion = 0 at trunnion, positive values go FORWARD (-Z in model)
-        let gz = (total_z - 2) - z_from_trunnion;
-        m.set(IVec3::new(x + half_x, y + cy, gz), id);
+        let gz = (total_z - 3) - z_from_trunnion;
+        m.set(IVec3::new(x + half_x, y + half_y, gz), id);
     };
 
-    // Armored recoil sleeve / mantlet collar near turret face
-    let collar_r: i32 = if thick { 2 } else { 1 };
-    for z in 0..mantlet_collar_len.min(length) {
-        for dy in -collar_r..=collar_r {
-            for dx in -collar_r..=collar_r {
-                if dx.abs() + dy.abs() < collar_r * 2 || !thick {
-                    set(&mut model, dx, dy, z, p.dark);
+    // Helper: fill a circular cross-section at `z` with radius `r` in 0.05 m voxels
+    let fill_disk = |m: &mut VoxelModel, z: i32, r: f32, id: VoxelId| {
+        let ir = r.ceil() as i32;
+        let r2 = r * r;
+        for dy in -ir..=ir {
+            for dx in -ir..=ir {
+                let d2 = (dx * dx + dy * dy) as f32;
+                if d2 <= r2 {
+                    set(m, dx, dy, z, id);
                 }
             }
         }
+    };
+
+    // 1. Heavy armored recoil sleeve / mantlet collar + canvas dust boot + retaining bolts
+    let collar_r: f32 = if thick { 3.15 } else { 2.15 };
+    for z in 0..collar_hi {
+        let mat = if z <= 1 {
+            VoxelId::CANVAS_TARP
+        } else if z == collar_hi - 1 {
+            p.trim
+        } else {
+            p.dark
+        };
+        fill_disk(&mut model, z, collar_r, mat);
+    }
+    // Bright steel retaining bolt heads around front lip of recoil sleeve
+    if collar_hi >= 3 {
+        let bolt_r = collar_r.floor() as i32;
+        set(&mut model, bolt_r, 0, collar_hi - 1, VoxelId::STEEL_BRIGHT);
+        set(&mut model, -bolt_r, 0, collar_hi - 1, VoxelId::STEEL_BRIGHT);
+        set(&mut model, 0, bolt_r, collar_hi - 1, VoxelId::STEEL_BRIGHT);
     }
 
-    // Main barrel tube
-    for z in mantlet_collar_len..length {
-        if thick {
-            // Thick octagonal 2x2 / cross-section tube for 88mm / 100mm / 120mm / 122mm / 128mm guns
+    // 2. Stepped tapered circular cannon barrel tube
+    let bore_evac_start = (len_hi * 44) / 100;
+    let bore_evac_end = (len_hi * 58) / 100;
+    let has_bore_evac = thick && length >= 34;
+
+    for z in collar_hi..len_hi {
+        let t = (z - collar_hi) as f32 / (len_hi - collar_hi).max(1) as f32;
+        let mut r = if thick {
+            if t < 0.35 {
+                2.15
+            } else if t < 0.72 {
+                1.75
+            } else {
+                1.45
+            }
+        } else if t < 0.38 {
+            1.45
+        } else {
+            1.05
+        };
+
+        let mut mat = p.gun;
+        // Authentic mid-barrel bore evacuator (fume extractor) bulge on long heavy guns
+        if has_bore_evac && (bore_evac_start..=bore_evac_end).contains(&z) {
+            r = if z == bore_evac_start || z == bore_evac_end {
+                2.15
+            } else {
+                2.50
+            };
+            mat = p.dark;
+        }
+        // Subtle machined step ring where barrel tapers
+        if (thick && (z == collar_hi + ((len_hi - collar_hi) * 35) / 100))
+            || (!thick && z == collar_hi + ((len_hi - collar_hi) * 38) / 100)
+        {
+            mat = p.dark;
+        }
+
+        fill_disk(&mut model, z, r, mat);
+    }
+
+    // 3. Authentic 0.05 m muzzle brake styles (or machined muzzle collar ring)
+    match brake {
+        MuzzleBrakeStyle::None => {
+            // Crisp machined muzzle collar ring + recessed dark rifled bore
+            let ring_r = if thick { 1.80 } else { 1.35 };
+            fill_disk(&mut model, len_hi - 1, ring_r, p.dark);
+            fill_disk(&mut model, len_hi, ring_r, p.trim);
+            set(&mut model, 0, 0, len_hi, p.black);
+            set(&mut model, 0, 0, len_hi + 1, p.black);
+        }
+        MuzzleBrakeStyle::DoubleBaffle => {
+            // Iconic German KwK 40 / KwK 36 / KwK 43 & Soviet D-25T bulbous double-baffle brake
+            let z0 = (len_hi - 8).max(4);
+            let z1 = len_hi + 1;
+            let bx_max: i32 = if thick { 3 } else { 2 };
+            let by_max: i32 = 2;
+            for z in z0..=z1 {
+                let is_rear_collar = z == z0;
+                let is_baffle_wall = z == z0 + 1 || z == z0 + 4 || z == z0 + 7 || z == z1;
+                let is_vent_chamber = (z == z0 + 2 || z == z0 + 3) || (z == z0 + 5 || z == z0 + 6);
+                for dy in -by_max..=by_max {
+                    for dx in -bx_max..=bx_max {
+                        if dx.abs() == bx_max && dy.abs() == by_max {
+                            continue; // Octagonal chamfered profile
+                        }
+                        if is_rear_collar {
+                            if dx.abs() < bx_max && dy.abs() < by_max {
+                                set(&mut model, dx, dy, z, p.dark);
+                            }
+                        } else if is_vent_chamber {
+                            // Hollow side blast slots: leave outer mid-height vents open Air!
+                            if dy.abs() <= 1 && dx.abs() >= 1 {
+                                if dx.abs() == 1 && dy == 0 {
+                                    set(&mut model, dx, dy, z, p.black);
+                                } else {
+                                    set(&mut model, dx, dy, z, VoxelId::AIR);
+                                }
+                            } else {
+                                set(&mut model, dx, dy, z, p.trim);
+                            }
+                        } else if is_baffle_wall {
+                            let mat = if z == z1 && (dx.abs() == bx_max || dy.abs() == by_max) {
+                                VoxelId::STEEL_BRIGHT
+                            } else {
+                                p.trim
+                            };
+                            set(&mut model, dx, dy, z, mat);
+                        }
+                    }
+                }
+            }
+            // Deep recessed dark bore opening at muzzle face
             for dy in -1i32..=1 {
                 for dx in -1i32..=1 {
-                    if dx.abs() + dy.abs() <= 1 || z < length * 2 / 3 {
-                        set(&mut model, dx, dy, z, p.gun);
+                    if dx.abs() + dy.abs() <= 1 {
+                        set(&mut model, dx, dy, z1, p.black);
                     }
                 }
             }
-        } else {
-            // Crisp slender tube for 20mm / 37mm / 45mm / 50mm / 75mm / 76mm guns
-            set(&mut model, 0, 0, z, p.gun);
-            set(&mut model, 0, 1, z, p.gun);
-            if z < length / 2 {
-                set(&mut model, -1, 0, z, p.gun);
-                set(&mut model, 1, 0, z, p.gun);
-            }
-        }
-    }
-
-    // Dark bore opening shadow right at muzzle tip
-    set(&mut model, 0, 0, length, p.black);
-
-    // Authentic muzzle brake styles
-    match brake {
-        MuzzleBrakeStyle::None => {}
-        MuzzleBrakeStyle::DoubleBaffle => {
-            // Iconic German KwK 40 / KwK 36 / KwK 43 or Soviet D-25T bulbous double-baffle brake
-            let z0 = (length - 4).max(2);
-            let z1 = length;
-            for z in z0..=z1 {
-                let is_baffle_slot = z == z0 + 1 || z == z0 + 3;
-                for dy in -1i32..=1 {
-                    for dx in -2i32..=2 {
-                        if is_baffle_slot && dx.abs() >= 1 && dy == 0 {
-                            set(&mut model, dx, dy, z, p.black);
-                        } else if dx.abs() + dy.abs() <= 2 {
-                            set(&mut model, dx, dy, z, p.trim);
-                        }
-                    }
-                }
-            }
-            set(&mut model, 0, 0, z1, p.black);
         }
         MuzzleBrakeStyle::TShaped => {
-            // Iconic US 76mm M1A2 / 90mm M3 T-shaped muzzle brake
-            let z0 = (length - 2).max(2);
-            for z in z0..=length {
-                for dy in -1i32..=1 {
-                    for dx in -2i32..=2 {
-                        if z == z0 + 1 && dx.abs() == 2 && dy == 0 {
-                            set(&mut model, dx, dy, z, p.black);
-                        } else if dy == 0 || dx.abs() <= 1 {
+            // Iconic US 76mm M1A2 / 90mm M3 / 120mm T53 T-shaped twin-port muzzle brake
+            let z0 = (len_hi - 5).max(4);
+            let z1 = len_hi + 1;
+            let wing_x: i32 = if thick { 4 } else { 3 };
+            for z in z0..=z1 {
+                let is_port = z == z0 + 2 || z == z0 + 3 || z == z0 + 4;
+                for dy in -2i32..=2 {
+                    for dx in -wing_x..=wing_x {
+                        if is_port {
+                            // Wide T-wings with hollow horizontal side blast ports
+                            if dy == 0 && dx.abs() >= 2 {
+                                set(&mut model, dx, dy, z, VoxelId::AIR);
+                            } else if dy.abs() <= 1 || dx.abs() <= 1 {
+                                let mat = if dx.abs() == wing_x && dy.abs() == 1 {
+                                    VoxelId::STEEL_BRIGHT
+                                } else {
+                                    p.trim
+                                };
+                                set(&mut model, dx, dy, z, mat);
+                            }
+                        } else if (z == z0 || z == z0 + 1) && dx.abs() <= 2 && dy.abs() <= 2 && dx.abs() + dy.abs() <= 3 {
+                            set(&mut model, dx, dy, z, p.dark);
+                        } else if z == z1 && dy.abs() <= 1 && dx.abs() <= wing_x {
                             set(&mut model, dx, dy, z, p.trim);
                         }
                     }
                 }
             }
-            set(&mut model, 0, 0, length, p.black);
+            // Dark recessed bore opening
+            set(&mut model, 0, 0, z1, p.black);
+            set(&mut model, 1, 0, z1, p.black);
+            set(&mut model, -1, 0, z1, p.black);
         }
     }
 
@@ -612,9 +722,12 @@ pub fn assemble_tank(
     barrel_len_vox: f32,
 ) -> TankVoxelModels {
     let vs = DETAIL_VOXEL_SIZE;
+    let hull_lo = hull.into_model();
+    let turret_lo = turret.into_model();
+    let (hull_hi, turret_hi) = refine::refine_hull_and_turret(&hull_lo, &turret_lo);
     TankVoxelModels {
-        hull: hull.into_model(),
-        turret: turret.into_model(),
+        hull: hull_hi,
+        turret: turret_hi,
         barrel,
         turret_mount_offset: turret_mount_vox * vs,
         gun_mount_offset: gun_mount_vox * vs,
@@ -622,7 +735,7 @@ pub fn assemble_tank(
     }
 }
 
-/// Dispatches a Stage 5 catalog `vehicle_id` to its bespoke high-detail `0.10 m` voxel sculptor.
+/// Dispatches a Stage 5 catalog `vehicle_id` to its bespoke `0.05 m` super-detail voxel sculptor.
 pub fn build_vehicle_models(vehicle_id: &str) -> Option<TankVoxelModels> {
     usa::build_usa_vehicle(vehicle_id)
         .or_else(|| germany::build_germany_vehicle(vehicle_id))
